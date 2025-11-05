@@ -1,4 +1,5 @@
 narwhals==2.10.2
+nbformat>=4.2.0
 numpy==2.0.2
 packaging==25.0
 pandas==2.3.3
@@ -8,4 +9,8 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 rawpy==0.25.1
 six==1.17.0
+tqdm
 tzdata==2025.2
+
+# Optional: GPU acceleration (requires NVIDIA GPU and CUDA)
+# cupy-cuda12x

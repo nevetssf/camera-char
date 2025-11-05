@@ -1,109 +1,318 @@
-#standard modules
+# Standard modules
 import os
 
-#common 3rd party
+# Common 3rd party
 import numpy as np
 import plotly.express as px
 import pandas as pd
+from tqdm import tqdm
 
-#raw-specific modules
+# Raw-specific modules
 import exiftool
 import rawpy
 
+# GPU acceleration (optional)
+try:
+    import cupy as cp
+    GPU_AVAILABLE = True
+    print("GPU acceleration enabled (CuPy detected)")
+except ImportError:
+    cp = None
+    GPU_AVAILABLE = False
+    print("GPU acceleration not available (CuPy not installed)")
+
+
 class Sensor(object):
-    def __init__(self, path='.'):
-        self.path = path
+    """Analyzes noise characteristics of camera sensors from raw image files."""
     
-    def scan(self, path=None, suffix='DNG'):
-        """Scan a directory for all raw files and create a data table summarizing the noise.
-        """
+    # Camera-specific crop regions to remove artifacts
+    CAMERA_CROPS = {
+        "LEICA Q (Typ 116)": (slice(None), slice(0, 6011)),
+        "RICOH GR III": (slice(28, 4052), slice(56, 6088)),
+        "LEICA CL": (slice(None), slice(0, 6048)),
+        "LEICA Q3": (slice(None), slice(0, 7412)),
+        "LEICA SL2-S": (slice(0, 4000), slice(0, 6000)),
+    }
+    
+    def __init__(self, path='.', use_gpu=True):
+        """Initialize Sensor with a base path for scanning.
         
-        if path is None:
-            path = self.path
-
-        fn_list = sorted([i for i in os.listdir(path) if i.upper().endswith(suffix)])
-
-        with exiftool.ExifToolHelper() as et:
-            #metadata = et.get_metadata(fn_list)
-
-            data = pd.DataFrame()
-
-            i_total = len(fn_list)
-            for i, fn in enumerate(fn_list):
-                print('%d/%d %s' % (i, i_total, fn))
-                      
-                fn_abs = os.path.join(path, fn)
-                #print('Scanning %s' % fn_abs)
-                with exiftool.ExifToolHelper() as et:
-                    metadata = et.get_metadata(fn_abs)[0]
-                raw = rawpy.imread(fn_abs)
-                
-                #handle black level as string of levels per channel - happens in Leica Q
-                black_level = metadata.get('EXIF:BlackLevel')
-                if black_level is None:
-                    black_level = metadata.get('MakerNotes:BlackLevel')
-                if isinstance(black_level, str):
-                    black_level = int(black_level.split()[0])
-                elif black_level is None:
-                    black_level = raw.black_level_per_channel[0]
-                    
-                #handle white level as string of levels per channel - happens in Leica Q
-                white_level = metadata.get('EXIF:WhiteLevel')
-                if white_level is None:
-                    #assume the white level is the bit depth
-                    bits = metadata.get('EXIF:BitsPerSample')
-                    if bits is not None:
-                        white_level = 2**bits
-                if isinstance(white_level, str):
-                    white_level = int(white_level.split()[0])
-                    
-                image = raw.raw_image
-                   
-                camera = metadata.get('EXIF:UniqueCameraModel')
-                if camera is None:
-                    camera = metadata.get('EXIF:Model')
-                if camera == "LEICA Q (Typ 116)":
-                    #handle artifacts on right side of Q sensor
-                    image = image[:, 0:6011]
-                elif camera == "RICOH GR III":
-                    image = image[28:4052, 56:6088]
-                elif camera == "LEICA CL":
-                    image = image[:, 0:6048]
-                elif camera == "LEICA Q3":
-                    image = image[:, 0:7412]
-                elif camera == "LEICA SL2-S":
-                    #print('using crop for sl2-s')
-                    #image = image[:, 0:6030]
-                    #image = image[:, 0:6024]
-                    image = image[0:4000, 0:6000]
-                    #image = image[1000:1500, 1000:1500]
-
-                width = metadata.get('EXIF:ExifImageWidth')
-                if width is None:
-                    width = metadata.get('EXIF:ImageWidth')
-                height = metadata.get('EXIF:ExifImageHeight')
-                if height is None:
-                    height = metadata.get('EXIF:ImageHeight')
-                
-                df = pd.DataFrame({
-                    'camera':[camera],
-                    'source':[metadata.get('SourceFile')],
-                    'black_level':[black_level],
-                    'white_level':[white_level],
-                    'width':width,
-                    'height':height,
-                    #'white':[raw.white_level],
-                    'iso':[metadata.get('EXIF:ISO')],
-                    'time':[metadata.get('EXIF:ExposureTime')],
-                    'std':[np.std(image)],
-                    'mean':[np.mean(image)],
-                    'min':[np.min(image)],
-                    'max':[np.max(image)],
-                })
-                data = pd.concat([data, df])
-                raw.close()
-            self.data = data
-            #exposure value - (max digital range)/(std dev)
-            data['EV'] = data.apply(lambda x: np.log((x['white_level']-x['black_level'])/x['std'])/np.log(2), axis='columns')
+        Args:
+            path: Base directory path containing camera raw files
+            use_gpu: Use GPU acceleration if available (default: True)
+        """
+        self.path = path
+        self.data = None
+        self.use_gpu = use_gpu and GPU_AVAILABLE
+        
+        if use_gpu and not GPU_AVAILABLE:
+            print("Warning: GPU requested but not available, falling back to CPU")
+    
+    def _get_scan_path(self, path):
+        """Construct the full scan path from base path and relative path.
+        
+        Args:
+            path: Relative path or None to use base path
             
-        return(data)
+        Returns:
+            Full absolute path for scanning
+        """
+        if path is None:
+            return self.path
+        return os.path.join(self.path, path)
+    
+    def _get_file_list(self, directory, suffix):
+        """Get sorted list of raw files with given suffix.
+        
+        Args:
+            directory: Directory to scan
+            suffix: File extension to filter by
+            
+        Returns:
+            Sorted list of filenames
+        """
+        return sorted([
+            filename for filename in os.listdir(directory) 
+            if filename.upper().endswith(suffix.upper())
+        ])
+    
+    def _extract_black_level(self, metadata, raw):
+        """Extract black level from metadata or raw file.
+        
+        Args:
+            metadata: EXIF metadata dictionary
+            raw: rawpy RawImage object
+            
+        Returns:
+            Black level value as integer
+        """
+        black_level = metadata.get('EXIF:BlackLevel')
+        if black_level is None:
+            black_level = metadata.get('MakerNotes:BlackLevel')
+        
+        if isinstance(black_level, str):
+            return int(black_level.split()[0])
+        elif black_level is None:
+            return raw.black_level_per_channel[0]
+        
+        return black_level
+    
+    def _extract_white_level(self, metadata):
+        """Extract white level from metadata.
+        
+        Args:
+            metadata: EXIF metadata dictionary
+            
+        Returns:
+            White level value as integer
+        """
+        white_level = metadata.get('EXIF:WhiteLevel')
+        
+        if white_level is None:
+            # Assume white level is based on bit depth
+            bits = metadata.get('EXIF:BitsPerSample')
+            if bits is not None:
+                white_level = 2**bits
+        
+        if isinstance(white_level, str):
+            return int(white_level.split()[0])
+        
+        return white_level
+    
+    def _extract_camera_name(self, metadata):
+        """Extract camera name from metadata.
+        
+        Args:
+            metadata: EXIF metadata dictionary
+            
+        Returns:
+            Camera name string
+        """
+        camera = metadata.get('EXIF:UniqueCameraModel')
+        if camera is None:
+            camera = metadata.get('EXIF:Model')
+        return camera
+    
+    def _apply_camera_crop(self, image, camera):
+        """Apply camera-specific crop to remove artifacts.
+        
+        Args:
+            image: numpy array of raw image data
+            camera: Camera name string
+            
+        Returns:
+            Cropped image array
+        """
+        if camera in self.CAMERA_CROPS:
+            crop = self.CAMERA_CROPS[camera]
+            return image[crop[0], crop[1]]
+        return image
+    
+    def _extract_dimensions(self, metadata):
+        """Extract image dimensions from metadata.
+        
+        Args:
+            metadata: EXIF metadata dictionary
+            
+        Returns:
+            Tuple of (width, height)
+        """
+        width = metadata.get('EXIF:ExifImageWidth')
+        if width is None:
+            width = metadata.get('EXIF:ImageWidth')
+        
+        height = metadata.get('EXIF:ExifImageHeight')
+        if height is None:
+            height = metadata.get('EXIF:ImageHeight')
+        
+        return width, height
+    
+    def _calculate_image_stats(self, image):
+        """Calculate statistical measures of image data.
+        
+        Uses GPU acceleration if enabled and available.
+        
+        Args:
+            image: numpy array of raw image data
+            
+        Returns:
+            Dictionary with std, mean, min, max values
+        """
+        if self.use_gpu:
+            # Transfer to GPU, compute, and transfer back
+            gpu_image = cp.asarray(image)
+            stats = {
+                'std': float(cp.std(gpu_image)),
+                'mean': float(cp.mean(gpu_image)),
+                'min': float(cp.min(gpu_image)),
+                'max': float(cp.max(gpu_image)),
+            }
+            # Explicitly free GPU memory
+            del gpu_image
+        else:
+            # CPU computation
+            stats = {
+                'std': np.std(image),
+                'mean': np.mean(image),
+                'min': np.min(image),
+                'max': np.max(image),
+            }
+        
+        return stats
+    
+    def _process_raw_file(self, filepath, metadata):
+        """Process a single raw file and extract noise characteristics.
+        
+        Args:
+            filepath: Path to raw file
+            metadata: EXIF metadata dictionary
+            
+        Returns:
+            Dictionary with processed data for this file
+        """
+        raw = rawpy.imread(filepath)
+        
+        # Extract metadata
+        black_level = self._extract_black_level(metadata, raw)
+        white_level = self._extract_white_level(metadata)
+        camera = self._extract_camera_name(metadata)
+        width, height = self._extract_dimensions(metadata)
+        
+        # Process image
+        image = raw.raw_image
+        image = self._apply_camera_crop(image, camera)
+        stats = self._calculate_image_stats(image)
+        
+        raw.close()
+        
+        # Build result dictionary
+        return {
+            'camera': camera,
+            'source': metadata.get('SourceFile'),
+            'black_level': black_level,
+            'white_level': white_level,
+            'width': width,
+            'height': height,
+            'iso': metadata.get('EXIF:ISO'),
+            'time': metadata.get('EXIF:ExposureTime'),
+            **stats
+        }
+    
+    def _calculate_exposure_value(self, data):
+        """Calculate exposure value (EV) from noise data.
+        
+        EV = log2((white_level - black_level) / std_dev)
+        
+        Args:
+            data: DataFrame with noise measurements
+            
+        Returns:
+            DataFrame with EV column added
+        """
+        data['EV'] = data.apply(
+            lambda x: np.log((x['white_level'] - x['black_level']) / x['std']) / np.log(2),
+            axis='columns'
+        )
+        return data
+    
+    def _save_results(self, data, directory):
+        """Save scan results to CSV file in the scanned directory.
+        
+        Args:
+            data: DataFrame with scan results
+            directory: Directory to save results in
+        """
+        output_file = os.path.join(directory, 'noise_results.csv')
+        data.to_csv(output_file, index=False)
+        print(f'Results saved to: {output_file}')
+    
+    def scan(self, path=None, suffix='DNG', force_rescan=False):
+        """Scan a directory for raw files and analyze noise characteristics.
+        
+        Args:
+            path: Relative path from base directory (None to use base path)
+            suffix: File extension to scan for (default: 'DNG')
+            force_rescan: If True, rescan even if results exist (default: False)
+            
+        Returns:
+            DataFrame with noise analysis results for all scanned files
+        """
+        full_path = self._get_scan_path(path)
+        results_file = os.path.join(full_path, 'noise_results.csv')
+        
+        # Check if results already exist
+        if not force_rescan and os.path.exists(results_file):
+            print(f'Loading existing results from: {results_file}')
+            data = pd.read_csv(results_file)
+            self.data = data
+            return data
+        
+        file_list = self._get_file_list(full_path, suffix)
+        
+        results = []
+        
+        with exiftool.ExifToolHelper() as et:
+            # Create progress bar
+            with tqdm(total=len(file_list), desc='Scanning files', unit='file') as pbar:
+                for filename in file_list:
+                    # Update progress bar with current filename
+                    pbar.set_postfix_str(f'Processing: {filename}')
+                    
+                    filepath = os.path.join(full_path, filename)
+                    metadata = et.get_metadata(filepath)[0]
+                    
+                    file_data = self._process_raw_file(filepath, metadata)
+                    results.append(file_data)
+                    
+                    # Update progress bar
+                    pbar.update(1)
+        
+        # Create DataFrame and calculate derived metrics
+        data = pd.DataFrame(results)
+        data = self._calculate_exposure_value(data)
+        
+        # Store and save results
+        self.data = data
+        self._save_results(data, full_path)
+        
+        return data

@@ -384,8 +384,14 @@ class Analysis(object):
         if camera_list is None:
             camera_list = list(self.scan_results.keys())
         
-        # Concatenate selected camera data
-        data_frames = [self.scan_results[name] for name in camera_list if name in self.scan_results]
+        # Concatenate selected camera data, preserving the scan_specs key as camera name
+        data_frames = []
+        for name in camera_list:
+            if name in self.scan_results:
+                df = self.scan_results[name].copy()
+                # Override the EXIF camera name with the scan_specs key to preserve variant info
+                df['camera'] = name
+                data_frames.append(df)
         
         if not data_frames:
             raise ValueError("No valid cameras found in scan results")
@@ -466,26 +472,71 @@ class Analysis(object):
             ev_padding = (ev_max - ev_min) * 0.1
             ev_range = [ev_min - ev_padding, ev_max + ev_padding]
         
-        # Create the plot
-        fig = px.line(
-            filtered_data, 
-            x='iso', y='EV', color='camera', 
-            markers=True, log_x=True,
-            height=height,
-            labels={
-                'iso': 'ISO Sensitivity',
-                'EV': 'Exposure Value (EV)',
-                'camera': 'Camera Model'
-            },
-            title=title
-        )
+        # Parse camera names to extract base model and group variants
+        def parse_camera_name(name):
+            """Extract base model and variant from camera name."""
+            if '(' in name:
+                parts = name.split('(')
+                base = parts[0].strip()
+                variant = '(' + parts[1].strip()
+                return base, variant
+            return name, ''
         
-        # Update traces for better visibility
-        fig.update_traces(
-            mode="markers+lines", 
-            marker=dict(size=8, line=dict(width=1, color='white')),
-            line=dict(width=2.5),
-            hovertemplate='%{fullData.name}: %{y:.2f} EV<extra></extra>'
+        # Group cameras by base model
+        camera_groups = {}
+        for camera in filtered_data['camera'].unique():
+            base_model, variant = parse_camera_name(camera)
+            if base_model not in camera_groups:
+                camera_groups[base_model] = []
+            camera_groups[base_model].append((camera, variant))
+        
+        # Create color palette for base models
+        import plotly.colors as pc
+        color_sequence = pc.qualitative.Plotly
+        base_model_colors = {}
+        for i, base_model in enumerate(camera_groups.keys()):
+            base_model_colors[base_model] = color_sequence[i % len(color_sequence)]
+        
+        # Line styles for variants
+        line_styles = ['solid', 'dash', 'dot', 'dashdot', 'longdash', 'longdashdot']
+        
+        # Create the plot manually to control colors and grouping
+        from plotly import graph_objects as go
+        fig = go.Figure()
+        
+        for base_model, variants in camera_groups.items():
+            base_color = base_model_colors[base_model]
+            has_multiple_variants = len(variants) > 1
+            
+            for idx, (camera_name, variant) in enumerate(variants):
+                camera_data = filtered_data[filtered_data['camera'] == camera_name]
+                
+                # Use different line styles for variants of the same base model
+                line_style = line_styles[idx % len(line_styles)] if has_multiple_variants else 'solid'
+                
+                trace = go.Scatter(
+                    x=camera_data['iso'],
+                    y=camera_data['EV'],
+                    mode='markers+lines',
+                    name=camera_name,
+                    legendgroup=base_model,
+                    legendgrouptitle=dict(text=base_model) if has_multiple_variants else None,
+                    line=dict(color=base_color, width=2.5, dash=line_style),
+                    marker=dict(size=8, color=base_color, line=dict(width=1, color='white')),
+                    hovertemplate=f'{camera_name}: %{{y:.2f}} EV<extra></extra>',
+                    showlegend=True
+                )
+                fig.add_trace(trace)
+        
+        # Update axes to log scale for x
+        fig.update_xaxes(type='log')
+        
+        # Set title and labels
+        fig.update_layout(
+            title=title,
+            xaxis_title='ISO Sensitivity',
+            yaxis_title='Exposure Value (EV)',
+            height=height
         )
         
         # Update layout for professional appearance

@@ -318,92 +318,212 @@ class Sensor(object):
         return data
 
 
-def plot_ev_vs_iso(data, exposure_time=0.004, title=None, height=700, ev_range=None):
-    """Create a professional plot of Exposure Value vs ISO for camera comparison.
+class Analysis(object):
+    """Manages aggregate analysis of multiple camera sensors."""
     
-    Args:
-        data: DataFrame with camera noise data (must have columns: iso, EV, camera, time)
-        exposure_time: Filter data to this exposure time (default: 0.004 = 1/250s)
-        title: Custom title for the plot (default: auto-generated)
-        height: Plot height in pixels (default: 700)
-        ev_range: Tuple of (min, max) for Y-axis range (default: auto-calculated with padding)
+    def __init__(self, base_path='.'):
+        """Initialize Analysis with a base path for scanning.
         
-    Returns:
-        Plotly figure object
-    """
-    # Filter data by exposure time
-    filtered_data = data[data['time'] == exposure_time]
+        Args:
+            base_path: Base directory path containing camera raw files
+        """
+        self.base_path = base_path
+        self.sensor = Sensor(base_path)
+        self.scan_results = None
+        self.aggregate_data = None
     
-    # Generate title if not provided
-    if title is None:
-        shutter_speed = f"1/{int(1/exposure_time)}s" if exposure_time > 0 else "N/A"
-        title = f'Camera Sensor Dynamic Range vs ISO Sensitivity<br><sub>Measured at {shutter_speed} shutter speed</sub>'
+    def scan(self, scan_specs, force_rescan=False):
+        """Scan multiple cameras according to specifications.
+        
+        Args:
+            scan_specs: OrderedDict with camera names as keys and scan parameters as values
+                       Each value should be a dict with 'path' and 'suffix' keys
+            force_rescan: If True, rescan even if cached results exist (default: False)
+            
+        Returns:
+            OrderedDict with scan results for each camera
+            
+        Example:
+            >>> from collections import OrderedDict
+            >>> specs = OrderedDict([
+            ...     ('Leica M11', {'path': 'M11-36MP', 'suffix': 'DNG'}),
+            ...     ('Leica Q3', {'path': 'Q3-36MP', 'suffix': 'DNG'}),
+            ... ])
+            >>> analysis = Analysis('/path/to/data')
+            >>> results = analysis.scan(specs)
+        """
+        from collections import OrderedDict
+        
+        scan_results = OrderedDict()
+        
+        for name, params in scan_specs.items():
+            print(f"Scanning {name}...")
+            # Add force_rescan to params if specified
+            scan_params = params.copy()
+            scan_params['force_rescan'] = force_rescan
+            
+            # Scan and store results
+            scan_results[name] = self.sensor.scan(**scan_params)
+        
+        self.scan_results = scan_results
+        return scan_results
     
-    # Calculate EV range if not provided - add 10% padding
-    if ev_range is None:
-        ev_min = filtered_data['EV'].min()
-        ev_max = filtered_data['EV'].max()
-        ev_padding = (ev_max - ev_min) * 0.1
-        ev_range = [ev_min - ev_padding, ev_max + ev_padding]
+    def create_aggregate(self, camera_list=None):
+        """Create aggregate DataFrame from scan results.
+        
+        Args:
+            camera_list: List of camera names to include (default: all scanned cameras)
+            
+        Returns:
+            Combined DataFrame with data from selected cameras
+        """
+        if self.scan_results is None:
+            raise ValueError("No scan results available. Run scan() first.")
+        
+        # Use all cameras if not specified
+        if camera_list is None:
+            camera_list = list(self.scan_results.keys())
+        
+        # Concatenate selected camera data
+        data_frames = [self.scan_results[name] for name in camera_list if name in self.scan_results]
+        
+        if not data_frames:
+            raise ValueError("No valid cameras found in scan results")
+        
+        self.aggregate_data = pd.concat(data_frames, ignore_index=True)
+        return self.aggregate_data
     
-    # Create the plot
-    fig = px.line(
-        filtered_data, 
-        x='iso', y='EV', color='camera', 
-        markers=True, log_x=True,
-        height=height,
-        labels={
-            'iso': 'ISO Sensitivity',
-            'EV': 'Exposure Value (EV)',
-            'camera': 'Camera Model'
-        },
-        title=title
-    )
+    def save_aggregate(self, filename='aggregate_analysis.csv'):
+        """Save aggregate data to CSV file.
+        
+        Args:
+            filename: Output filename (default: 'aggregate_analysis.csv')
+        """
+        if self.aggregate_data is None:
+            raise ValueError("No aggregate data available. Run create_aggregate() first.")
+        
+        self.aggregate_data.to_csv(filename, index=False)
+        print(f"Aggregate analysis saved to: {filename}")
     
-    # Update traces for better visibility
-    fig.update_traces(
-        mode="markers+lines", 
-        marker=dict(size=8, line=dict(width=1, color='white')),
-        line=dict(width=2.5),
-        hovertemplate='%{fullData.name}: %{y:.2f} EV<extra></extra>'
-    )
+    def get_aliases(self, short_names=None):
+        """Create convenient variable aliases for scan results.
+        
+        Args:
+            short_names: Dict mapping camera names to short variable names
+                        If None, uses simple numbered aliases
+        
+        Returns:
+            Dictionary of aliases pointing to scan results
+        """
+        if self.scan_results is None:
+            raise ValueError("No scan results available. Run scan() first.")
+        
+        aliases = {}
+        
+        if short_names is None:
+            # Auto-generate simple aliases
+            for i, name in enumerate(self.scan_results.keys()):
+                aliases[f'camera_{i}'] = self.scan_results[name]
+        else:
+            # Use provided mapping
+            for full_name, short_name in short_names.items():
+                if full_name in self.scan_results:
+                    aliases[short_name] = self.scan_results[full_name]
+        
+        return aliases
     
-    # Update layout for professional appearance
-    fig.update_layout(
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="white", font_size=12),
-        font=dict(family="Arial, sans-serif", size=12),
-        title=dict(font=dict(size=18, color='#2c3e50'), x=0.5, xanchor='center'),
-        xaxis=dict(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(128,128,128,0.2)',
-            title_font=dict(size=14, color='#2c3e50'),
-            tickfont=dict(size=11),
-            hoverformat=',d'  # Format ISO as integer with thousands separator
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(128,128,128,0.2)',
-            title_font=dict(size=14, color='#2c3e50'),
-            tickfont=dict(size=11),
-            range=ev_range
-        ),
-        legend=dict(
-            title=dict(text='Camera Model', font=dict(size=13, color='#2c3e50')),
-            font=dict(size=11),
-            bgcolor='rgba(255,255,255,0.9)',
-            bordercolor='rgba(128,128,128,0.3)',
-            borderwidth=1,
-            x=1.02,
-            y=1,
-            xanchor='left',
-            yanchor='top'
-        ),
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        margin=dict(l=80, r=200, t=100, b=80)
-    )
-    
-    return fig
+    def plot_ev_vs_iso(self, data=None, exposure_time=0.004, title=None, height=700, ev_range=None):
+        """Create a professional plot of Exposure Value vs ISO for camera comparison.
+        
+        Args:
+            data: DataFrame with camera noise data (default: uses self.aggregate_data)
+            exposure_time: Filter data to this exposure time (default: 0.004 = 1/250s)
+            title: Custom title for the plot (default: auto-generated)
+            height: Plot height in pixels (default: 700)
+            ev_range: Tuple of (min, max) for Y-axis range (default: auto-calculated with padding)
+            
+        Returns:
+            Plotly figure object
+        """
+        # Use aggregate data if not provided
+        if data is None:
+            if self.aggregate_data is None:
+                raise ValueError("No data available. Run create_aggregate() first or provide data.")
+            data = self.aggregate_data
+        
+        # Filter data by exposure time
+        filtered_data = data[data['time'] == exposure_time]
+        
+        # Generate title if not provided
+        if title is None:
+            shutter_speed = f"1/{int(1/exposure_time)}s" if exposure_time > 0 else "N/A"
+            title = f'Camera Sensor Dynamic Range vs ISO Sensitivity<br><sub>Measured at {shutter_speed} shutter speed</sub>'
+        
+        # Calculate EV range if not provided - add 10% padding
+        if ev_range is None:
+            ev_min = filtered_data['EV'].min()
+            ev_max = filtered_data['EV'].max()
+            ev_padding = (ev_max - ev_min) * 0.1
+            ev_range = [ev_min - ev_padding, ev_max + ev_padding]
+        
+        # Create the plot
+        fig = px.line(
+            filtered_data, 
+            x='iso', y='EV', color='camera', 
+            markers=True, log_x=True,
+            height=height,
+            labels={
+                'iso': 'ISO Sensitivity',
+                'EV': 'Exposure Value (EV)',
+                'camera': 'Camera Model'
+            },
+            title=title
+        )
+        
+        # Update traces for better visibility
+        fig.update_traces(
+            mode="markers+lines", 
+            marker=dict(size=8, line=dict(width=1, color='white')),
+            line=dict(width=2.5),
+            hovertemplate='%{fullData.name}: %{y:.2f} EV<extra></extra>'
+        )
+        
+        # Update layout for professional appearance
+        fig.update_layout(
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            font=dict(family="Arial, sans-serif", size=12),
+            title=dict(font=dict(size=18, color='#2c3e50'), x=0.5, xanchor='center'),
+            xaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(128,128,128,0.2)',
+                title_font=dict(size=14, color='#2c3e50'),
+                tickfont=dict(size=11),
+                hoverformat=',d'  # Format ISO as integer with thousands separator
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(128,128,128,0.2)',
+                title_font=dict(size=14, color='#2c3e50'),
+                tickfont=dict(size=11),
+                range=ev_range
+            ),
+            legend=dict(
+                title=dict(text='Camera Model', font=dict(size=13, color='#2c3e50')),
+                font=dict(size=11),
+                bgcolor='rgba(255,255,255,0.9)',
+                bordercolor='rgba(128,128,128,0.3)',
+                borderwidth=1,
+                x=1.02,
+                y=1,
+                xanchor='left',
+                yanchor='top'
+            ),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            margin=dict(l=80, r=200, t=100, b=80)
+        )
+        
+        return fig

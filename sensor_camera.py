@@ -438,18 +438,23 @@ class Analysis(object):
         
         return aliases
     
-    def plot_ev_vs_iso(self, data=None, exposure_time=0.004, title=None, height=700, ev_range=None):
+    def plot_ev_vs_iso(self, data=None, exposure_time=None, title=None, height=700, ev_range=None):
         """Create a professional plot of Exposure Value vs ISO for camera comparison.
         
         Args:
             data: DataFrame with camera noise data (default: uses self.aggregate_data)
-            exposure_time: Filter data to this exposure time (default: 0.004 = 1/250s)
+            exposure_time: Filter data to this exposure time. Can be:
+                          - Single value (e.g., 0.004 for 1/250s)
+                          - List of values (e.g., [0.004, 0.001])
+                          - None (creates plot for each unique exposure time)
+                          Default: None (all exposure times)
             title: Custom title for the plot (default: auto-generated)
             height: Plot height in pixels (default: 700)
             ev_range: Tuple of (min, max) for Y-axis range (default: auto-calculated with padding)
             
         Returns:
-            Plotly figure object
+            Single Plotly figure (if exposure_time is single value)
+            or list of figures (if exposure_time is list or None)
         """
         # Use aggregate data if not provided
         if data is None:
@@ -457,6 +462,28 @@ class Analysis(object):
                 raise ValueError("No data available. Run create_aggregate() first or provide data.")
             data = self.aggregate_data
         
+        # Handle multiple exposure times
+        if exposure_time is None:
+            # Get all unique exposure times, sorted
+            exposure_times = sorted(data['time'].unique())
+        elif isinstance(exposure_time, (list, tuple)):
+            exposure_times = exposure_time
+        else:
+            exposure_times = [exposure_time]
+        
+        # If multiple exposure times, create multiple plots
+        if len(exposure_times) > 1:
+            figures = []
+            for exp_time in exposure_times:
+                fig = self._create_ev_vs_iso_plot(data, exp_time, title, height, ev_range)
+                figures.append(fig)
+            return figures
+        
+        # Single exposure time - create one plot
+        return self._create_ev_vs_iso_plot(data, exposure_times[0], title, height, ev_range)
+    
+    def _create_ev_vs_iso_plot(self, data, exposure_time, title, height, ev_range):
+        """Internal method to create a single EV vs ISO plot."""
         # Filter data by exposure time
         filtered_data = data[data['time'] == exposure_time]
         
@@ -552,6 +579,175 @@ class Analysis(object):
                 title_font=dict(size=14, color='#2c3e50'),
                 tickfont=dict(size=11),
                 hoverformat=',d'  # Format ISO as integer with thousands separator
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(128,128,128,0.2)',
+                title_font=dict(size=14, color='#2c3e50'),
+                tickfont=dict(size=11),
+                range=ev_range
+            ),
+            legend=dict(
+                title=dict(text='Camera Model', font=dict(size=13, color='#2c3e50')),
+                font=dict(size=11),
+                bgcolor='rgba(255,255,255,0.9)',
+                bordercolor='rgba(128,128,128,0.3)',
+                borderwidth=1,
+                x=1.02,
+                y=1,
+                xanchor='left',
+                yanchor='top'
+            ),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            margin=dict(l=80, r=200, t=100, b=80)
+        )
+        
+        return fig
+    
+    def plot_ev_vs_time(self, data=None, iso=None, title=None, height=700, ev_range=None):
+        """Create a professional plot of Exposure Value vs Exposure Time for camera comparison.
+        
+        Args:
+            data: DataFrame with camera noise data (default: uses self.aggregate_data)
+            iso: Filter data to this ISO value. Can be:
+                 - Single value (e.g., 3200)
+                 - List of values (e.g., [3200, 6400])
+                 - None (creates plot for each unique ISO value)
+                 Default: None
+            title: Custom title for the plot (default: auto-generated)
+            height: Plot height in pixels (default: 700)
+            ev_range: Tuple of (min, max) for Y-axis range (default: auto-calculated with padding)
+            
+        Returns:
+            Single Plotly figure (if iso is single value)
+            or list of figures (if iso is list or None)
+        """
+        # Use aggregate data if not provided
+        if data is None:
+            if self.aggregate_data is None:
+                raise ValueError("No data available. Run create_aggregate() first or provide data.")
+            data = self.aggregate_data
+        
+        # Handle multiple ISO values
+        if iso is None:
+            # Get all unique ISO values, sorted
+            iso_values = sorted(data['iso'].unique())
+        elif isinstance(iso, (list, tuple)):
+            iso_values = iso
+        else:
+            iso_values = [iso]
+        
+        # If multiple ISO values, create multiple plots
+        if len(iso_values) > 1:
+            figures = []
+            for iso_val in iso_values:
+                fig = self._create_ev_vs_time_plot(data, iso_val, title, height, ev_range)
+                figures.append(fig)
+            return figures
+        
+        # Single ISO value - create one plot
+        return self._create_ev_vs_time_plot(data, iso_values[0], title, height, ev_range)
+    
+    def _create_ev_vs_time_plot(self, data, iso, title, height, ev_range):
+        """Internal method to create a single EV vs Time plot."""
+        # Filter data by ISO
+        filtered_data = data[data['iso'] == iso]
+        if len(filtered_data) == 0:
+            raise ValueError(f"No data found for ISO {iso}")
+        
+        # Generate title if not provided
+        if title is None:
+            title = f'Camera Sensor Dynamic Range vs Exposure Time<br><sub>Measured at ISO {iso}</sub>'
+        
+        # Calculate EV range if not provided - add 10% padding
+        if ev_range is None:
+            ev_min = filtered_data['EV'].min()
+            ev_max = filtered_data['EV'].max()
+            ev_padding = (ev_max - ev_min) * 0.1
+            ev_range = [ev_min - ev_padding, ev_max + ev_padding]
+        
+        # Parse camera names to extract base model and group variants
+        def parse_camera_name(name):
+            """Extract base model and variant from camera name."""
+            if '(' in name:
+                parts = name.split('(')
+                base = parts[0].strip()
+                variant = '(' + parts[1].strip()
+                return base, variant
+            return name, ''
+        
+        # Group cameras by base model
+        camera_groups = {}
+        for camera in filtered_data['camera'].unique():
+            base_model, variant = parse_camera_name(camera)
+            if base_model not in camera_groups:
+                camera_groups[base_model] = []
+            camera_groups[base_model].append((camera, variant))
+        
+        # Create color palette for base models
+        import plotly.colors as pc
+        color_sequence = pc.qualitative.Plotly
+        base_model_colors = {}
+        for i, base_model in enumerate(camera_groups.keys()):
+            base_model_colors[base_model] = color_sequence[i % len(color_sequence)]
+        
+        # Line styles for variants
+        line_styles = ['solid', 'dash', 'dot', 'dashdot', 'longdash', 'longdashdot']
+        
+        # Create the plot manually to control colors and grouping
+        from plotly import graph_objects as go
+        fig = go.Figure()
+        
+        for base_model, variants in camera_groups.items():
+            base_color = base_model_colors[base_model]
+            has_multiple_variants = len(variants) > 1
+            
+            for idx, (camera_name, variant) in enumerate(variants):
+                camera_data = filtered_data[filtered_data['camera'] == camera_name].sort_values('time')
+                
+                # Use different line styles for variants of the same base model
+                line_style = line_styles[idx % len(line_styles)] if has_multiple_variants else 'solid'
+                
+                trace = go.Scatter(
+                    x=camera_data['time'],
+                    y=camera_data['EV'],
+                    mode='markers+lines',
+                    name=camera_name,
+                    legendgroup=base_model,
+                    legendgrouptitle=dict(text=base_model) if has_multiple_variants else None,
+                    line=dict(color=base_color, width=2.5, dash=line_style),
+                    marker=dict(size=8, color=base_color, line=dict(width=1, color='white')),
+                    hovertemplate=f'{camera_name}: %{{y:.2f}} EV<extra></extra>',
+                    showlegend=True
+                )
+                fig.add_trace(trace)
+        
+        # Update axes to log scale for x
+        fig.update_xaxes(type='log')
+        
+        # Set title and labels
+        fig.update_layout(
+            title=title,
+            xaxis_title='Exposure Time (seconds)',
+            yaxis_title='Exposure Value (EV)',
+            height=height
+        )
+        
+        # Update layout for professional appearance
+        fig.update_layout(
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            font=dict(family="Arial, sans-serif", size=12),
+            title=dict(font=dict(size=18, color='#2c3e50'), x=0.5, xanchor='center'),
+            xaxis=dict(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(128,128,128,0.2)',
+                title_font=dict(size=14, color='#2c3e50'),
+                tickfont=dict(size=11),
+                hoverformat='.4f'  # Format time with 4 decimals
             ),
             yaxis=dict(
                 showgrid=True,

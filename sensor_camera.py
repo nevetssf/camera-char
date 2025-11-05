@@ -316,3 +316,94 @@ class Sensor(object):
         self._save_results(data, full_path)
         
         return data
+
+
+def plot_ev_vs_iso(data, exposure_time=0.004, title=None, height=700, ev_range=None):
+    """Create a professional plot of Exposure Value vs ISO for camera comparison.
+    
+    Args:
+        data: DataFrame with camera noise data (must have columns: iso, EV, camera, time)
+        exposure_time: Filter data to this exposure time (default: 0.004 = 1/250s)
+        title: Custom title for the plot (default: auto-generated)
+        height: Plot height in pixels (default: 700)
+        ev_range: Tuple of (min, max) for Y-axis range (default: auto-calculated with padding)
+        
+    Returns:
+        Plotly figure object
+    """
+    # Filter data by exposure time
+    filtered_data = data[data['time'] == exposure_time]
+    
+    # Generate title if not provided
+    if title is None:
+        shutter_speed = f"1/{int(1/exposure_time)}s" if exposure_time > 0 else "N/A"
+        title = f'Camera Sensor Dynamic Range vs ISO Sensitivity<br><sub>Measured at {shutter_speed} shutter speed</sub>'
+    
+    # Calculate EV range if not provided - add 10% padding
+    if ev_range is None:
+        ev_min = filtered_data['EV'].min()
+        ev_max = filtered_data['EV'].max()
+        ev_padding = (ev_max - ev_min) * 0.1
+        ev_range = [ev_min - ev_padding, ev_max + ev_padding]
+    
+    # Create the plot
+    fig = px.line(
+        filtered_data, 
+        x='iso', y='EV', color='camera', 
+        markers=True, log_x=True,
+        height=height,
+        labels={
+            'iso': 'ISO Sensitivity',
+            'EV': 'Exposure Value (EV)',
+            'camera': 'Camera Model'
+        },
+        title=title
+    )
+    
+    # Update traces for better visibility
+    fig.update_traces(
+        mode="markers+lines", 
+        marker=dict(size=8, line=dict(width=1, color='white')),
+        line=dict(width=2.5),
+        hovertemplate='%{fullData.name}: %{y:.2f} EV<extra></extra>'
+    )
+    
+    # Update layout for professional appearance
+    fig.update_layout(
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="white", font_size=12),
+        font=dict(family="Arial, sans-serif", size=12),
+        title=dict(font=dict(size=18, color='#2c3e50'), x=0.5, xanchor='center'),
+        xaxis=dict(
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(128,128,128,0.2)',
+            title_font=dict(size=14, color='#2c3e50'),
+            tickfont=dict(size=11),
+            hoverformat=',d'  # Format ISO as integer with thousands separator
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(128,128,128,0.2)',
+            title_font=dict(size=14, color='#2c3e50'),
+            tickfont=dict(size=11),
+            range=ev_range
+        ),
+        legend=dict(
+            title=dict(text='Camera Model', font=dict(size=13, color='#2c3e50')),
+            font=dict(size=11),
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='rgba(128,128,128,0.3)',
+            borderwidth=1,
+            x=1.02,
+            y=1,
+            xanchor='left',
+            yanchor='top'
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin=dict(l=80, r=200, t=100, b=80)
+    )
+    
+    return fig

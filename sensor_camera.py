@@ -11,12 +11,15 @@ import exiftool
 import rawpy
 
 class Sensor(object):
-    def __init__(self):
-        pass
+    def __init__(self, path='.'):
+        self.path = path
     
-    def scan(self, path='.', suffix='DNG'):
+    def scan(self, path=None, suffix='DNG'):
         """Scan a directory for all raw files and create a data table summarizing the noise.
         """
+        
+        if path is None:
+            path = self.path
 
         fn_list = sorted([i for i in os.listdir(path) if i.upper().endswith(suffix)])
 

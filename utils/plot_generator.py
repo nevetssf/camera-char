@@ -15,14 +15,23 @@ from sensor_camera import Analysis
 class PlotGenerator:
     """Wrapper around Analysis class for generating filtered plots"""
 
-    def __init__(self, base_path: str = '.', csv_path: str = 'aggregate_analysis.csv'):
+    def __init__(self, base_path: Optional[str] = None, csv_path: Optional[str] = None):
         """
         Initialize plot generator.
 
         Args:
-            base_path: Base directory path
-            csv_path: Path to aggregate_analysis.csv
+            base_path: Base directory path (uses config working dir if None)
+            csv_path: Path to aggregate_analysis.csv (uses config if None)
         """
+        # Get paths from config if not provided
+        if csv_path is None or base_path is None:
+            from utils.config_manager import get_config
+            config = get_config()
+            if csv_path is None:
+                csv_path = str(config.get_aggregate_csv_path())
+            if base_path is None:
+                base_path = str(config.get_working_dir())
+
         self.base_path = Path(base_path)
         self.csv_path = Path(csv_path)
         self.analysis: Optional[Analysis] = None
@@ -266,13 +275,13 @@ class PlotGenerator:
 _global_generator: Optional[PlotGenerator] = None
 
 
-def get_plot_generator(base_path: str = '.', csv_path: str = 'aggregate_analysis.csv') -> PlotGenerator:
+def get_plot_generator(base_path: Optional[str] = None, csv_path: Optional[str] = None) -> PlotGenerator:
     """
     Get or create global plot generator instance.
 
     Args:
-        base_path: Base directory path
-        csv_path: Path to aggregate CSV
+        base_path: Base directory path (uses config if None)
+        csv_path: Path to aggregate CSV (uses config if None)
 
     Returns:
         PlotGenerator instance

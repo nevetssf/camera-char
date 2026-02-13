@@ -1,115 +1,41 @@
 """
-Image viewer widget for displaying raw camera files and TIFFs.
-Provides zoom, pan, pixel inspection, and metadata display.
+Metadata viewer widget for displaying complete file metadata.
+Shows metadata in a table format with categorization and search.
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QLabel, QPushButton,
-    QGroupBox, QScrollArea, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
+    QTableWidgetItem, QPushButton, QLabel, QLineEdit,
+    QHeaderView, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QMouseEvent
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QPixmap, QImage
 import numpy as np
 from typing import Optional, Dict, Any
 from pathlib import Path
 
 from utils.image_loader import get_image_loader, normalize_for_display
-
-
-class ZoomableGraphicsView(QGraphicsView):
-    """Graphics view with zoom and pan capabilities"""
-
-    pixel_hovered = pyqtSignal(int, int, object)  # x, y, pixel_value
-
-    def __init__(self):
-        """Initialize zoomable graphics view"""
-        super().__init__()
-
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-        self.zoom_factor = 1.15
-        self.current_zoom = 1.0
-        self.min_zoom = 0.1
-        self.max_zoom = 20.0
-
-        self.setMouseTracking(True)
-        self.current_image = None
-
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        """Handle mouse wheel for zooming"""
-        if event.angleDelta().y() > 0:
-            # Zoom in
-            if self.current_zoom * self.zoom_factor <= self.max_zoom:
-                self.scale(self.zoom_factor, self.zoom_factor)
-                self.current_zoom *= self.zoom_factor
-        else:
-            # Zoom out
-            if self.current_zoom / self.zoom_factor >= self.min_zoom:
-                self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
-                self.current_zoom /= self.zoom_factor
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        """Handle mouse move for pixel inspection"""
-        super().mouseMoveEvent(event)
-
-        if self.current_image is not None:
-            # Map to scene coordinates
-            scene_pos = self.mapToScene(event.pos())
-            x, y = int(scene_pos.x()), int(scene_pos.y())
-
-            # Check if within image bounds
-            height, width = self.current_image.shape[:2]
-            if 0 <= x < width and 0 <= y < height:
-                # Get pixel value
-                pixel_value = self.current_image[y, x]
-                self.pixel_hovered.emit(x, y, pixel_value)
-
-    def fit_to_window(self) -> None:
-        """Fit image to window"""
-        self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        # Calculate zoom level
-        transform = self.transform()
-        self.current_zoom = transform.m11()
-
-    def zoom_to_actual_size(self) -> None:
-        """Reset zoom to 100%"""
-        self.resetTransform()
-        self.current_zoom = 1.0
-
-    def zoom_in(self) -> None:
-        """Zoom in"""
-        if self.current_zoom * self.zoom_factor <= self.max_zoom:
-            self.scale(self.zoom_factor, self.zoom_factor)
-            self.current_zoom *= self.zoom_factor
-
-    def zoom_out(self) -> None:
-        """Zoom out"""
-        if self.current_zoom / self.zoom_factor >= self.min_zoom:
-            self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
-            self.current_zoom /= self.zoom_factor
-
-    def set_image(self, image: np.ndarray) -> None:
-        """Set image to display"""
-        self.current_image = image
+from views.image_window import ImageWindow
 
 
 class ImageViewer(QWidget):
-    """Image viewer widget with controls and metadata"""
+    """Metadata viewer widget with popup image window"""
 
     image_loaded = pyqtSignal(str)  # Emitted when image is loaded
 
     def __init__(self):
-        """Initialize image viewer"""
+        """Initialize metadata viewer"""
         super().__init__()
 
         self.image_loader = get_image_loader()
         self.current_file_path: Optional[str] = None
         self.current_camera_model: Optional[str] = None
+        self.current_metadata: Optional[Dict[str, Any]] = None
+        self.current_pixmap: Optional[QPixmap] = None
+        self.current_display_array: Optional[np.ndarray] = None
+
+        # Persistent image window
+        self.image_window: Optional[ImageWindow] = None
 
         self._create_ui()
 
@@ -118,109 +44,122 @@ class ImageViewer(QWidget):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        # Controls row
-        controls_layout = QHBoxLayout()
+        # Header with controls
+        header_layout = QHBoxLayout()
 
-        self.btn_fit = QPushButton("Fit to Window")
-        self.btn_fit.clicked.connect(self._on_fit_to_window)
-        controls_layout.addWidget(self.btn_fit)
+        self.filename_label = QLabel("No file loaded")
+        filename_font = QFont()
+        filename_font.setPointSize(12)
+        filename_font.setBold(True)
+        self.filename_label.setFont(filename_font)
+        header_layout.addWidget(self.filename_label)
 
-        self.btn_actual_size = QPushButton("100%")
-        self.btn_actual_size.clicked.connect(self._on_actual_size)
-        controls_layout.addWidget(self.btn_actual_size)
+        header_layout.addStretch()
 
-        self.btn_zoom_in = QPushButton("Zoom In")
-        self.btn_zoom_in.clicked.connect(self._on_zoom_in)
-        controls_layout.addWidget(self.btn_zoom_in)
+        # Pop out image button
+        self.btn_pop_out_image = QPushButton("🖼️ View Image")
+        self.btn_pop_out_image.clicked.connect(self._on_pop_out_image)
+        self.btn_pop_out_image.setEnabled(False)
+        header_layout.addWidget(self.btn_pop_out_image)
 
-        self.btn_zoom_out = QPushButton("Zoom Out")
-        self.btn_zoom_out.clicked.connect(self._on_zoom_out)
-        controls_layout.addWidget(self.btn_zoom_out)
+        # Search box
+        search_label = QLabel("Search:")
+        header_layout.addWidget(search_label)
 
-        self.zoom_label = QLabel("Zoom: 100%")
-        controls_layout.addWidget(self.zoom_label)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search metadata...")
+        self.search_input.setMaximumWidth(250)
+        self.search_input.textChanged.connect(self._filter_table)
+        header_layout.addWidget(self.search_input)
 
-        controls_layout.addStretch()
+        layout.addLayout(header_layout)
 
-        layout.addLayout(controls_layout)
+        # Metadata table
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Category", "Key", "Value"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSortingEnabled(True)
 
-        # Graphics view
-        self.graphics_view = ZoomableGraphicsView()
-        self.graphics_scene = QGraphicsScene()
-        self.graphics_view.setScene(self.graphics_scene)
-        self.pixmap_item = QGraphicsPixmapItem()
-        self.graphics_scene.addItem(self.pixmap_item)
+        # Use appropriate font for readability
+        table_font = QFont("Courier New", 15)
+        self.table.setFont(table_font)
 
-        layout.addWidget(self.graphics_view, stretch=1)
+        layout.addWidget(self.table)
 
-        # Status bar for pixel info
-        self.pixel_info_label = QLabel("Pixel info: (hover over image)")
-        layout.addWidget(self.pixel_info_label)
+        # Status bar
+        self.status_label = QLabel("No metadata loaded")
+        layout.addWidget(self.status_label)
 
-        # Metadata panel (collapsible)
-        self.metadata_group = QGroupBox("Metadata")
-        metadata_layout = QVBoxLayout()
-        self.metadata_group.setLayout(metadata_layout)
-
-        self.metadata_scroll = QScrollArea()
-        self.metadata_scroll.setWidgetResizable(True)
-        self.metadata_scroll.setMaximumHeight(150)
-
-        self.metadata_label = QLabel("No image loaded")
-        self.metadata_label.setWordWrap(True)
-        self.metadata_scroll.setWidget(self.metadata_label)
-
-        metadata_layout.addWidget(self.metadata_scroll)
-        layout.addWidget(self.metadata_group)
-
-        # Connect signals
-        self.graphics_view.pixel_hovered.connect(self._on_pixel_hovered)
+        # Store full metadata for filtering
+        self.full_metadata = []
 
     def load_image(self, file_path: str, fast_preview: bool = False,
                   camera_model: Optional[str] = None) -> None:
         """
-        Load and display an image.
+        Load and display image metadata.
 
         Args:
             file_path: Path to image file
             fast_preview: Use fast preview mode
             camera_model: Camera model for crop lookup
         """
+        from utils.app_logger import get_logger
+        logger = get_logger()
+
         try:
+            logger.info(f"Loading image: {file_path}")
+            logger.debug(f"  fast_preview: {fast_preview}, camera_model: {camera_model}")
+
             # Load image using image loader
+            logger.debug("Calling image_loader.load_image()")
             image_array = self.image_loader.load_image(
                 file_path,
                 fast_preview=fast_preview,
                 camera_model=camera_model
             )
+            logger.debug(f"Image loaded, shape: {image_array.shape}, dtype: {image_array.dtype}")
 
             # Normalize for display
+            logger.debug("Normalizing image for display")
             display_array = normalize_for_display(image_array)
+            logger.debug(f"Normalized array shape: {display_array.shape}, dtype: {display_array.dtype}")
 
             # Convert to QPixmap
+            logger.debug("Converting to QPixmap")
             pixmap = self._numpy_to_pixmap(display_array)
+            logger.debug(f"QPixmap created, size: {pixmap.width()}x{pixmap.height()}")
 
-            # Display in graphics view
-            self.pixmap_item.setPixmap(pixmap)
-            self.graphics_scene.setSceneRect(QRectF(pixmap.rect()))
-            self.graphics_view.set_image(display_array)
-            self.graphics_view.fit_to_window()
-
-            # Update zoom label
-            self._update_zoom_label()
-
-            # Store current file info
+            # Store for popup window
+            self.current_pixmap = pixmap
+            self.current_display_array = display_array
             self.current_file_path = file_path
             self.current_camera_model = camera_model
 
             # Load and display metadata
+            logger.debug("Loading metadata")
             self._load_metadata(file_path)
 
+            # Enable pop out button
+            self.btn_pop_out_image.setEnabled(True)
+
+            # Update image window if it's open
+            if self.image_window and self.image_window.isVisible():
+                self.image_window.load_image(pixmap, display_array, file_path)
+
             # Emit signal
+            logger.info(f"Image loaded successfully: {Path(file_path).name}")
             self.image_loaded.emit(file_path)
 
         except Exception as e:
-            self.metadata_label.setText(f"Error loading image:\n{str(e)}")
+            logger.error(f"Failed to load image: {file_path}", exc_info=True)
+            self.filename_label.setText(f"Error loading: {Path(file_path).name}")
+            self.status_label.setText(f"Error: {str(e)}")
             raise
 
     def _numpy_to_pixmap(self, image_array: np.ndarray) -> QPixmap:
@@ -233,10 +172,14 @@ class ImageViewer(QWidget):
         Returns:
             QPixmap
         """
+        # Ensure array is contiguous
+        if not image_array.flags['C_CONTIGUOUS']:
+            image_array = np.ascontiguousarray(image_array)
+
         height, width = image_array.shape[:2]
 
         if len(image_array.shape) == 2:
-            # Grayscale
+            # Grayscale (2D array)
             bytes_per_line = width
             q_image = QImage(
                 image_array.data,
@@ -245,8 +188,20 @@ class ImageViewer(QWidget):
                 bytes_per_line,
                 QImage.Format.Format_Grayscale8
             )
+        elif image_array.shape[2] == 1:
+            # Grayscale with single channel dimension (H, W, 1)
+            # Squeeze to 2D
+            image_array_2d = image_array.squeeze()
+            bytes_per_line = width
+            q_image = QImage(
+                image_array_2d.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_Grayscale8
+            )
         else:
-            # RGB
+            # RGB (H, W, 3)
             bytes_per_line = 3 * width
             q_image = QImage(
                 image_array.data,
@@ -259,86 +214,209 @@ class ImageViewer(QWidget):
         return QPixmap.fromImage(q_image)
 
     def _load_metadata(self, file_path: str) -> None:
-        """Load and display metadata"""
+        """Load metadata from raw file"""
+        from utils.app_logger import get_logger
+        logger = get_logger()
+
         try:
-            from models.image_model import ImageModel
-            image_model = ImageModel()
+            logger.debug("Loading metadata with ExifTool")
+            import exiftool
 
-            # Get simple metadata (fast)
-            metadata = image_model.get_simple_metadata(file_path)
+            with exiftool.ExifToolHelper() as et:
+                metadata_list = et.get_metadata([file_path])
+                if not metadata_list:
+                    self.current_metadata = {}
+                    self.filename_label.setText(f"📄 {Path(file_path).name}")
+                    self.status_label.setText("No metadata available")
+                    return
 
-            # Format metadata for display
-            metadata_text = "<table>"
-            metadata_text += f"<tr><td><b>File:</b></td><td>{metadata.get('file_name', 'N/A')}</td></tr>"
-            metadata_text += f"<tr><td><b>Size:</b></td><td>{self._format_file_size(metadata.get('file_size', 0))}</td></tr>"
+                metadata = metadata_list[0]
+                self.current_metadata = metadata
+                logger.debug(f"Loaded {len(metadata)} metadata fields")
 
-            if 'width' in metadata and 'height' in metadata:
-                metadata_text += f"<tr><td><b>Dimensions:</b></td><td>{metadata['width']} x {metadata['height']}</td></tr>"
-
-            if 'channels' in metadata:
-                metadata_text += f"<tr><td><b>Channels:</b></td><td>{metadata['channels']}</td></tr>"
-
-            if self.current_camera_model:
-                metadata_text += f"<tr><td><b>Camera:</b></td><td>{self.current_camera_model}</td></tr>"
-
-            metadata_text += "</table>"
-
-            self.metadata_label.setText(metadata_text)
+                # Update display
+                self.filename_label.setText(f"📄 {Path(file_path).name}")
+                self._display_metadata(file_path, metadata)
 
         except Exception as e:
-            self.metadata_label.setText(f"Metadata: {Path(file_path).name}")
+            logger.error(f"Failed to load metadata: {e}", exc_info=True)
+            self.current_metadata = {}
+            self.filename_label.setText(f"📄 {Path(file_path).name}")
+            self.status_label.setText(f"Error loading metadata: {str(e)}")
 
-    def _format_file_size(self, size_bytes: int) -> str:
-        """Format file size in human-readable format"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.2f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.2f} TB"
+    def _display_metadata(self, file_path: str, metadata: Dict[str, Any]) -> None:
+        """Display metadata in table"""
+        # Organize metadata by category
+        categorized = self._categorize_metadata(metadata)
 
-    def _on_fit_to_window(self) -> None:
-        """Handle fit to window button"""
-        self.graphics_view.fit_to_window()
-        self._update_zoom_label()
+        # Store for filtering
+        self.full_metadata = categorized
 
-    def _on_actual_size(self) -> None:
-        """Handle actual size button"""
-        self.graphics_view.zoom_to_actual_size()
-        self._update_zoom_label()
+        # Populate table
+        self._populate_table(categorized)
 
-    def _on_zoom_in(self) -> None:
-        """Handle zoom in button"""
-        self.graphics_view.zoom_in()
-        self._update_zoom_label()
+        # Update status
+        self.status_label.setText(f"{len(metadata)} metadata fields")
 
-    def _on_zoom_out(self) -> None:
-        """Handle zoom out button"""
-        self.graphics_view.zoom_out()
-        self._update_zoom_label()
+        # Re-apply search filter if there's text in the search box
+        if self.search_input.text():
+            self._filter_table(self.search_input.text())
 
-    def _update_zoom_label(self) -> None:
-        """Update zoom percentage label"""
-        zoom_percent = self.graphics_view.current_zoom * 100
-        self.zoom_label.setText(f"Zoom: {zoom_percent:.0f}%")
+    def _categorize_metadata(self, metadata: Dict[str, Any]) -> list:
+        """
+        Organize metadata into categories.
 
-    def _on_pixel_hovered(self, x: int, y: int, pixel_value: Any) -> None:
-        """Handle pixel hover event"""
-        if isinstance(pixel_value, np.ndarray):
-            # RGB pixel
-            if len(pixel_value) == 3:
-                r, g, b = pixel_value
-                self.pixel_info_label.setText(
-                    f"Pixel: ({x}, {y}) | RGB: ({r}, {g}, {b})"
-                )
-            else:
-                self.pixel_info_label.setText(
-                    f"Pixel: ({x}, {y}) | Value: {pixel_value}"
-                )
+        Args:
+            metadata: Raw metadata dictionary
+
+        Returns:
+            List of tuples (category, key, value)
+        """
+        # Define category mappings
+        category_map = {
+            "File": ["File:"],
+            "Camera": ["EXIF:Make", "EXIF:Model", "EXIF:SerialNumber", "EXIF:InternalSerialNumber",
+                      "EXIF:LensMake", "EXIF:LensModel", "EXIF:LensSerialNumber"],
+            "Exposure": ["EXIF:ISO", "EXIF:ExposureTime", "EXIF:ShutterSpeed", "EXIF:FNumber",
+                        "EXIF:Aperture", "EXIF:ExposureProgram", "EXIF:ExposureMode",
+                        "EXIF:MeteringMode", "EXIF:ExposureCompensation", "EXIF:Flash",
+                        "EXIF:FocalLength", "EXIF:FocalLengthIn35mmFormat"],
+            "Image": ["EXIF:ImageWidth", "EXIF:ImageHeight", "EXIF:Orientation", "EXIF:BitsPerSample",
+                     "EXIF:SamplesPerPixel", "EXIF:PhotometricInterpretation", "EXIF:Compression",
+                     "File:ImageWidth", "File:ImageHeight", "Composite:ImageSize", "Composite:Megapixels"],
+            "Color": ["EXIF:ColorSpace", "EXIF:WhiteBalance", "EXIF:ColorTemperature",
+                     "EXIF:ColorMatrix1", "EXIF:ColorMatrix2", "EXIF:CalibrationIlluminant1",
+                     "EXIF:CalibrationIlluminant2", "EXIF:AsShotNeutral", "EXIF:BaselineExposure"],
+            "Date/Time": ["EXIF:DateTimeOriginal", "EXIF:CreateDate", "EXIF:ModifyDate",
+                         "EXIF:OffsetTime", "EXIF:OffsetTimeOriginal", "EXIF:SubSecTime",
+                         "File:FileModifyDate", "File:FileAccessDate"],
+            "GPS": ["GPS:"],
+            "DNG": ["EXIF:DNGVersion", "EXIF:DNGBackwardVersion", "EXIF:UniqueCameraModel",
+                   "EXIF:BlackLevel", "EXIF:WhiteLevel", "EXIF:DefaultCropOrigin", "EXIF:DefaultCropSize",
+                   "EXIF:ActiveArea", "EXIF:AnalogBalance"],
+            "MakerNotes": ["MakerNotes:", "Leica:"],
+            "Composite": ["Composite:"]
+        }
+
+        result = []
+        assigned_keys = set()
+
+        # First pass: assign to specific categories
+        for category, patterns in category_map.items():
+            for key, value in sorted(metadata.items()):
+                if key.startswith("SourceFile"):
+                    continue
+
+                # Check if key matches category pattern
+                matched = False
+                for pattern in patterns:
+                    if pattern in category_map["Camera"] or pattern in category_map["Exposure"] or \
+                       pattern in category_map["Image"] or pattern in category_map["Color"] or \
+                       pattern in category_map["Date/Time"] or pattern in category_map["DNG"]:
+                        # Exact match for specific keys
+                        if key == pattern:
+                            matched = True
+                            break
+                    else:
+                        # Prefix match for namespace categories
+                        if key.startswith(pattern):
+                            matched = True
+                            break
+
+                if matched:
+                    display_key = key.split(':')[-1] if ':' in key else key
+                    display_value = self._format_value(value)
+                    result.append((category, display_key, display_value))
+                    assigned_keys.add(key)
+
+        # Second pass: remaining items go to "Other"
+        for key, value in sorted(metadata.items()):
+            if key not in assigned_keys and not key.startswith("SourceFile"):
+                display_key = key.split(':')[-1] if ':' in key else key
+                display_value = self._format_value(value)
+                result.append(("Other", display_key, display_value))
+
+        return result
+
+    def _format_value(self, value: Any) -> str:
+        """Format metadata value for display"""
+        if isinstance(value, (list, tuple)):
+            # For arrays, show first few elements if long
+            if len(value) > 20:
+                preview = ', '.join(str(v) for v in value[:20])
+                return f"[{preview}... ({len(value)} items)]"
+            return f"[{', '.join(str(v) for v in value)}]"
+        elif isinstance(value, float):
+            # Format floats nicely
+            if abs(value) < 0.0001 or abs(value) > 1000000:
+                return f"{value:.6e}"
+            return f"{value:.6f}".rstrip('0').rstrip('.')
+        elif isinstance(value, int) and abs(value) > 1000000:
+            # Format large numbers with commas
+            return f"{value:,}"
         else:
-            # Grayscale pixel
-            self.pixel_info_label.setText(
-                f"Pixel: ({x}, {y}) | Value: {pixel_value}"
-            )
+            return str(value)
+
+    def _populate_table(self, categorized: list) -> None:
+        """Populate the table with categorized metadata"""
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(categorized))
+
+        for row, (category, key, value) in enumerate(categorized):
+            # Category column
+            cat_item = QTableWidgetItem(category)
+            cat_item.setForeground(Qt.GlobalColor.blue)
+            self.table.setItem(row, 0, cat_item)
+
+            # Key column
+            key_item = QTableWidgetItem(key)
+            key_font = QFont()
+            key_font.setBold(True)
+            key_item.setFont(key_font)
+            self.table.setItem(row, 1, key_item)
+
+            # Value column
+            value_item = QTableWidgetItem(value)
+            self.table.setItem(row, 2, value_item)
+
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+
+    def _filter_table(self, search_text: str) -> None:
+        """Filter table rows based on search text"""
+        search_text = search_text.lower()
+
+        for row in range(self.table.rowCount()):
+            # Check if search text matches category, key, or value
+            matches = False
+            for col in range(3):
+                item = self.table.item(row, col)
+                if item and search_text in item.text().lower():
+                    matches = True
+                    break
+
+            self.table.setRowHidden(row, not matches)
+
+    def _on_pop_out_image(self) -> None:
+        """Pop out the image window"""
+        if self.current_pixmap is None or self.current_display_array is None or not self.current_file_path:
+            return
+
+        # Create window if it doesn't exist
+        if self.image_window is None:
+            self.image_window = ImageWindow(self)
+
+        # Load image
+        self.image_window.load_image(
+            self.current_pixmap,
+            self.current_display_array,
+            self.current_file_path
+        )
+
+        # Show the window
+        self.image_window.show()
+        self.image_window.raise_()
+        self.image_window.activateWindow()
 
     def clear_cache(self) -> None:
         """Clear image cache"""

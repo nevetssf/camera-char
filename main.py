@@ -54,12 +54,8 @@ def check_dependencies() -> bool:
     Returns:
         True if all dependencies are met, False otherwise
     """
-    # Check for aggregate_analysis.csv
-    csv_path = Path('aggregate_analysis.csv')
-    if not csv_path.exists():
-        print("ERROR: aggregate_analysis.csv not found in current directory")
-        print("Please run the application from the camera-char project directory")
-        return False
+    # Note: aggregate_analysis.csv will be loaded from working directory
+    # Not required in current directory anymore
 
     # Check for sensor_camera module
     try:
@@ -108,21 +104,39 @@ def main():
         sys.exit(1)
 
     print("✓ All dependencies found")
+
+    # Initialize configuration
+    from utils.config_manager import get_config
+    config = get_config()
+    print(f"✓ Working directory: {config.get_working_dir()}")
+    print(f"✓ Source directory: {config.get_source_dir()}")
+
+    # Initialize logging
+    from utils.app_logger import init_logger
+    logger = init_logger(config.get_working_dir(), clear_on_start=True)
+    logger.info("Camera Sensor Analyzer starting up")
+    logger.info(f"Working directory: {config.get_working_dir()}")
+    logger.info(f"Source directory: {config.get_source_dir()}")
+
     print("Starting application...")
 
     # Create application
     app = setup_application()
 
     # Create main window
+    logger.info("Creating main window")
     main_window = MainWindow()
 
     # Create controller and connect to main window
+    logger.info("Creating application controller")
     controller = AppController(main_window)
 
     # Show main window
+    logger.info("Showing main window")
     main_window.show()
 
     print("✓ Application started successfully")
+    logger.info("Application started successfully")
     print("\nGUI Controls:")
     print("  - Left Panel: Browse and filter camera data")
     print("  - Center Tabs: View images and interactive plots")
@@ -138,7 +152,9 @@ def main():
 
     # Cleanup
     print("\nShutting down...")
+    logger.info("Application shutting down")
     controller.shutdown()
+    logger.info("Application closed successfully")
     print("✓ Application closed")
 
     sys.exit(exit_code)

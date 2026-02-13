@@ -13,7 +13,8 @@ from PyQt6.QtGui import QFont
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from views.image_viewer import ZoomableGraphicsView, QGraphicsScene, QGraphicsPixmapItem
+from views.image_window import ZoomableGraphicsView
+from PyQt6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem
 from utils.image_loader import get_image_loader, normalize_for_display
 from PyQt6.QtGui import QPixmap, QImage
 import numpy as np

@@ -204,7 +204,7 @@ These crops are automatically applied when loading images.
 ### Images Won't Load
 
 **File not found error**
-- Check that detector-noise/ directory exists
+- Check that noise_images/ directory exists
 - Verify raw files are present
 
 **Corrupted image error**

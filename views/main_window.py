@@ -25,10 +25,15 @@ class MainWindow(QMainWindow):
     # Signals
     file_selected = pyqtSignal(str)  # Emitted when a file is selected
 
-    def __init__(self):
+    def __init__(self, version: str = ""):
         """Initialize the main window"""
         super().__init__()
-        self.setWindowTitle("Sensor Analysis")
+
+        # Set window title with version
+        title = "Sensor Analysis"
+        if version:
+            title = f"{title} {version}"
+        self.setWindowTitle(title)
         self.setGeometry(100, 100, 1600, 900)
 
         # Create UI components
@@ -105,7 +110,7 @@ class MainWindow(QMainWindow):
 
         self.action_limit_100 = QAction("Limit to 100 Images (Testing)", self)
         self.action_limit_100.setCheckable(True)
-        self.action_limit_100.setChecked(True)  # Checked by default for testing
+        self.action_limit_100.setChecked(False)  # Unchecked by default
         self.action_limit_100.setStatusTip("Limit scans and analysis to 100 images for testing")
         # No connection needed - just checked when running operations
 

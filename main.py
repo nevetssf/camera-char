@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Camera Sensor Analyzer - Desktop Application
+Sensor Analysis - Desktop Application
 Main entry point for the PyQt6 application.
 
 A standalone desktop application for visualizing camera sensor noise characteristics
@@ -11,15 +11,80 @@ import sys
 import os
 from pathlib import Path
 
+# Version tracking
+VERSION = "0.1"
+
+# Set macOS app name BEFORE any Qt imports
+if sys.platform == 'darwin':
+    try:
+        import objc
+        from Foundation import NSBundle, NSMutableDictionary
+
+        # Get the main bundle
+        bundle = NSBundle.mainBundle()
+        if bundle:
+            # Get the info dictionary
+            info = bundle.infoDictionary()
+            if info:
+                # Set the app name
+                info['CFBundleName'] = 'Sensor Analysis'
+                info['CFBundleDisplayName'] = 'Sensor Analysis'
+                info['CFBundleExecutable'] = 'Sensor Analysis'
+    except:
+        pass
+
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 
 from views.main_window import MainWindow
 from controllers.app_controller import AppController
+
+
+def create_app_icon() -> QIcon:
+    """
+    Create application icon programmatically.
+
+    Returns:
+        QIcon for the application
+    """
+    # Create a 512x512 pixmap for high resolution
+    pixmap = QPixmap(512, 512)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Draw gradient background circle
+    from PyQt6.QtGui import QRadialGradient, QPen
+    gradient = QRadialGradient(256, 256, 256)
+    gradient.setColorAt(0, QColor(70, 130, 180))  # Steel blue
+    gradient.setColorAt(1, QColor(25, 55, 100))   # Dark blue
+
+    painter.setBrush(gradient)
+    painter.setPen(QPen(QColor(40, 80, 140), 10))
+    painter.drawEllipse(20, 20, 472, 472)
+
+    # Draw camera sensor grid (simplified representation)
+    painter.setPen(QPen(QColor(255, 255, 255, 180), 3))
+    for i in range(3):
+        for j in range(3):
+            x = 140 + i * 90
+            y = 140 + j * 90
+            painter.drawRect(x, y, 70, 70)
+
+    # Draw "S" letter
+    font = QFont("Arial", 280, QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.setPen(QColor(255, 255, 255, 230))
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "S")
+
+    painter.end()
+
+    return QIcon(pixmap)
 
 
 def setup_application() -> QApplication:
@@ -34,15 +99,41 @@ def setup_application() -> QApplication:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
+    # Set application name BEFORE creating QApplication instance
+    QApplication.setApplicationName("Sensor Analysis")
+
     app = QApplication(sys.argv)
 
     # Set application metadata
-    app.setApplicationName("Camera Sensor Analyzer")
-    app.setOrganizationName("Camera Sensor Analysis")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationDisplayName("Sensor Analysis")
+    app.setOrganizationName("Sensor Analysis")
+    app.setApplicationVersion(VERSION)
 
-    # Set application style (optional)
-    # app.setStyle('Fusion')  # Modern cross-platform style
+    # Set application icon
+    app_icon = create_app_icon()
+    app.setWindowIcon(app_icon)
+
+    # On macOS, aggressively set the app name using multiple methods
+    if sys.platform == 'darwin':
+        try:
+            from Foundation import NSProcessInfo
+            from AppKit import NSRunningApplication, NSApplicationActivationPolicyRegular
+
+            # Set process name
+            processInfo = NSProcessInfo.processInfo()
+            processInfo.setProcessName_("Sensor Analysis")
+
+            # Try to set the running application's localized name
+            currentApp = NSRunningApplication.currentApplication()
+            if currentApp:
+                try:
+                    # This is read-only, but trying anyway
+                    currentApp.localizedName = "Sensor Analysis"
+                except:
+                    pass
+
+        except ImportError:
+            pass  # pyobjc not available
 
     return app
 
@@ -54,8 +145,8 @@ def check_dependencies() -> bool:
     Returns:
         True if all dependencies are met, False otherwise
     """
-    # Note: aggregate_analysis.csv will be loaded from working directory
-    # Not required in current directory anymore
+    # Note: Analysis data is now stored in SQLite database
+    # Database will be created in working directory under db/analysis.db
 
     # Check for sensor_camera module
     try:
@@ -96,7 +187,7 @@ def check_dependencies() -> bool:
 
 def main():
     """Main entry point"""
-    print("Camera Sensor Analyzer v1.0.0")
+    print(f"Sensor Analysis v{VERSION}")
     print("=" * 50)
 
     # Check dependencies
@@ -114,7 +205,7 @@ def main():
     # Initialize logging
     from utils.app_logger import init_logger
     logger = init_logger(config.get_working_dir(), clear_on_start=True)
-    logger.info("Camera Sensor Analyzer starting up")
+    logger.info("Sensor Analysis starting up")
     logger.info(f"Working directory: {config.get_working_dir()}")
     logger.info(f"Source directory: {config.get_source_dir()}")
 
@@ -125,7 +216,7 @@ def main():
 
     # Create main window
     logger.info("Creating main window")
-    main_window = MainWindow()
+    main_window = MainWindow(version=VERSION)
 
     # Create controller and connect to main window
     logger.info("Creating application controller")

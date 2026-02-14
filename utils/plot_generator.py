@@ -15,36 +15,49 @@ from sensor_camera import Analysis
 class PlotGenerator:
     """Wrapper around Analysis class for generating filtered plots"""
 
-    def __init__(self, base_path: Optional[str] = None, csv_path: Optional[str] = None):
+    def __init__(self, base_path: Optional[str] = None):
         """
         Initialize plot generator.
 
         Args:
             base_path: Base directory path (uses config working dir if None)
-            csv_path: Path to aggregate_analysis.csv (uses config if None)
         """
-        # Get paths from config if not provided
-        if csv_path is None or base_path is None:
+        # Get base path from config if not provided
+        if base_path is None:
             from utils.config_manager import get_config
             config = get_config()
-            if csv_path is None:
-                csv_path = str(config.get_aggregate_csv_path())
-            if base_path is None:
-                base_path = str(config.get_working_dir())
+            base_path = str(config.get_working_dir())
 
         self.base_path = Path(base_path)
-        self.csv_path = Path(csv_path)
         self.analysis: Optional[Analysis] = None
         self.aggregate_data: Optional[pd.DataFrame] = None
         self._load_data()
 
     def _load_data(self) -> None:
-        """Load aggregate data and initialize Analysis"""
-        if not self.csv_path.exists():
-            raise FileNotFoundError(f"CSV file not found: {self.csv_path}")
+        """Load aggregate data from database and initialize Analysis"""
+        from utils.db_manager import get_db_manager
 
-        # Load aggregate data
-        self.aggregate_data = pd.read_csv(self.csv_path)
+        db = get_db_manager()
+        data_list = db.get_all_analysis_data(include_archived=False)
+
+        # Load aggregate data from database
+        if data_list:
+            self.aggregate_data = pd.DataFrame(data_list)
+        else:
+            # Create empty DataFrame with expected columns
+            self.aggregate_data = pd.DataFrame(columns=[
+                'camera', 'iso', 'exposure_time', 'ev', 'source', 'filename',
+                'xdim', 'ydim', 'megapixels', 'bits_per_sample',
+                'black_level', 'white_level'
+            ])
+
+        # Add 'time' alias for backward compatibility with sensor_camera.Analysis
+        if 'exposure_time' in self.aggregate_data.columns and 'time' not in self.aggregate_data.columns:
+            self.aggregate_data['time'] = self.aggregate_data['exposure_time']
+
+        # Add 'EV' alias for backward compatibility with sensor_camera.Analysis (expects uppercase)
+        if 'ev' in self.aggregate_data.columns and 'EV' not in self.aggregate_data.columns:
+            self.aggregate_data['EV'] = self.aggregate_data['ev']
 
         # Initialize Analysis with base path
         self.analysis = Analysis(base_path=str(self.base_path))
@@ -92,6 +105,13 @@ class PlotGenerator:
             filtered_data = self.aggregate_data[
                 self.aggregate_data['camera'].isin(camera_filter)
             ].copy()
+
+            # Ensure aliases are present in filtered data
+            if 'exposure_time' in filtered_data.columns and 'time' not in filtered_data.columns:
+                filtered_data['time'] = filtered_data['exposure_time']
+            if 'ev' in filtered_data.columns and 'EV' not in filtered_data.columns:
+                filtered_data['EV'] = filtered_data['ev']
+
             # Temporarily replace aggregate data
             original_data = self.analysis.aggregate_data
             self.analysis.aggregate_data = filtered_data
@@ -128,6 +148,13 @@ class PlotGenerator:
             filtered_data = self.aggregate_data[
                 self.aggregate_data['camera'].isin(camera_filter)
             ].copy()
+
+            # Ensure aliases are present in filtered data
+            if 'exposure_time' in filtered_data.columns and 'time' not in filtered_data.columns:
+                filtered_data['time'] = filtered_data['exposure_time']
+            if 'ev' in filtered_data.columns and 'EV' not in filtered_data.columns:
+                filtered_data['EV'] = filtered_data['ev']
+
             # Temporarily replace aggregate data
             original_data = self.analysis.aggregate_data
             self.analysis.aggregate_data = filtered_data
@@ -166,6 +193,13 @@ class PlotGenerator:
             filtered_data = self.aggregate_data[
                 self.aggregate_data['camera'].isin(camera_filter)
             ].copy()
+
+            # Ensure aliases are present in filtered data
+            if 'exposure_time' in filtered_data.columns and 'time' not in filtered_data.columns:
+                filtered_data['time'] = filtered_data['exposure_time']
+            if 'ev' in filtered_data.columns and 'EV' not in filtered_data.columns:
+                filtered_data['EV'] = filtered_data['ev']
+
             original_data = self.analysis.aggregate_data
             self.analysis.aggregate_data = filtered_data
         else:
@@ -188,7 +222,7 @@ class PlotGenerator:
         return fig
 
     def reload_data(self) -> None:
-        """Reload aggregate data from CSV"""
+        """Reload aggregate data from database"""
         self._load_data()
 
     def get_data_for_exposure_time(self, exposure_time: float,
@@ -275,18 +309,17 @@ class PlotGenerator:
 _global_generator: Optional[PlotGenerator] = None
 
 
-def get_plot_generator(base_path: Optional[str] = None, csv_path: Optional[str] = None) -> PlotGenerator:
+def get_plot_generator(base_path: Optional[str] = None) -> PlotGenerator:
     """
     Get or create global plot generator instance.
 
     Args:
         base_path: Base directory path (uses config if None)
-        csv_path: Path to aggregate CSV (uses config if None)
 
     Returns:
         PlotGenerator instance
     """
     global _global_generator
     if _global_generator is None:
-        _global_generator = PlotGenerator(base_path=base_path, csv_path=csv_path)
+        _global_generator = PlotGenerator(base_path=base_path)
     return _global_generator

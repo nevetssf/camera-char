@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         """Initialize the main window"""
         super().__init__()
-        self.setWindowTitle("Camera Sensor Analyzer")
+        self.setWindowTitle("Sensor Analysis")
         self.setGeometry(100, 100, 1600, 900)
 
         # Create UI components
@@ -37,6 +37,9 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
         self._create_status_bar()
         self._create_central_widget()
+
+        # Update database status
+        self.update_db_status()
 
     def _create_actions(self) -> None:
         """Create menu and toolbar actions"""
@@ -97,8 +100,36 @@ class MainWindow(QMainWindow):
 
         # Analysis menu actions
         self.action_run_analysis = QAction("Run Analysis...", self)
-        self.action_run_analysis.setStatusTip("Analyze raw images and generate aggregate CSV")
+        self.action_run_analysis.setStatusTip("Analyze raw images and save to database")
         self.action_run_analysis.triggered.connect(self._on_run_analysis)
+
+        self.action_limit_100 = QAction("Limit to 100 Images (Testing)", self)
+        self.action_limit_100.setCheckable(True)
+        self.action_limit_100.setChecked(True)  # Checked by default for testing
+        self.action_limit_100.setStatusTip("Limit scans and analysis to 100 images for testing")
+        # No connection needed - just checked when running operations
+
+        # Database menu actions
+        self.action_load_new = QAction("Load New...", self)
+        self.action_load_new.setStatusTip("Load new images and analyze (skips existing by checksum)")
+        self.action_load_new.triggered.connect(self._on_load_new)
+
+        self.action_db_stats = QAction("View Database Statistics", self)
+        self.action_db_stats.setStatusTip("View database statistics and information")
+        self.action_db_stats.triggered.connect(self._on_db_stats)
+
+        self.action_db_export = QAction("Export to CSV...", self)
+        self.action_db_export.setStatusTip("Export database to CSV file")
+        self.action_db_export.triggered.connect(self._on_db_export)
+
+        self.action_refresh = QAction("Refresh", self)
+        self.action_refresh.setShortcut("F5")
+        self.action_refresh.setStatusTip("Refresh data from database")
+        self.action_refresh.triggered.connect(self._on_db_refresh)
+
+        self.action_db_clear = QAction("Clear Database...", self)
+        self.action_db_clear.setStatusTip("Clear all data from database")
+        self.action_db_clear.triggered.connect(self._on_db_clear)
 
         # Help menu actions
         self.action_about = QAction("About", self)
@@ -122,11 +153,20 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("View")
         view_menu.addAction(self.action_toggle_comparison)
         view_menu.addSeparator()
+        view_menu.addAction(self.action_refresh)
+        view_menu.addSeparator()
         view_menu.addAction(self.action_clear_cache)
 
-        # Analysis menu
-        analysis_menu = menubar.addMenu("Analysis")
-        analysis_menu.addAction(self.action_run_analysis)
+        # Database menu
+        database_menu = menubar.addMenu("Database")
+        database_menu.addAction(self.action_load_new)
+        database_menu.addSeparator()
+        database_menu.addAction(self.action_limit_100)
+        database_menu.addSeparator()
+        database_menu.addAction(self.action_db_stats)
+        database_menu.addAction(self.action_db_export)
+        database_menu.addSeparator()
+        database_menu.addAction(self.action_db_clear)
 
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
@@ -152,6 +192,9 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.action_export_data)
         toolbar.addAction(self.action_export_plot)
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_db_stats)
+        toolbar.addAction(self.action_refresh)
         toolbar.addSeparator()
         toolbar.addAction(self.action_toggle_comparison)
         toolbar.addSeparator()
@@ -179,13 +222,9 @@ class MainWindow(QMainWindow):
         self.image_viewer = ImageViewer()
         self.tab_widget.addTab(self.image_viewer, "Metadata")
 
-        # Tab 2: EV vs ISO plot
-        self.plot_ev_iso = PlotViewer(plot_type="ev_vs_iso")
-        self.tab_widget.addTab(self.plot_ev_iso, "EV vs ISO")
-
-        # Tab 3: EV vs Time plot
-        self.plot_ev_time = PlotViewer(plot_type="ev_vs_time")
-        self.tab_widget.addTab(self.plot_ev_time, "EV vs Time")
+        # Tab 2: Plot viewer (unified for EV vs ISO and EV vs Time)
+        self.plot_viewer = PlotViewer(plot_type="ev_vs_iso")
+        self.tab_widget.addTab(self.plot_viewer, "Plot")
 
         main_splitter.addWidget(self.tab_widget)
 
@@ -257,15 +296,13 @@ class MainWindow(QMainWindow):
         # Get current tab
         current_index = self.tab_widget.currentIndex()
 
-        if current_index == 1:  # EV vs ISO
-            plot_viewer = self.plot_ev_iso
-        elif current_index == 2:  # EV vs Time
-            plot_viewer = self.plot_ev_time
+        if current_index == 1:  # Plot tab
+            plot_viewer = self.plot_viewer
         else:
             QMessageBox.warning(
                 self,
                 "No Plot Selected",
-                "Please select a plot tab (EV vs ISO or EV vs Time) to export."
+                "Please select the Plot tab to export."
             )
             return
 
@@ -401,10 +438,37 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QProgressBar
         from PyQt6.QtCore import QThread, pyqtSignal
         from utils.analysis_runner import AnalysisRunner
+        from utils.db_manager import get_db_manager
+
+        # Check if database has existing data
+        db = get_db_manager()
+        stats = db.get_stats()
+
+        if stats['total_images'] > 0:
+            reply = QMessageBox.question(
+                self,
+                "Database Has Existing Data",
+                f"The database already contains analysis data:\n\n"
+                f"  • {stats['total_images']} images\n"
+                f"  • {stats['cameras']} cameras\n"
+                f"  • {stats['analyzed_images']} analyzed\n\n"
+                f"Running the analysis will add new images to the database.\n\n"
+                f"Do you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.No:
+                self.status_bar.showMessage("Analysis cancelled by user")
+                return
+
+        # Check if limit is enabled
+        limit = 100 if self.action_limit_100.isChecked() else None
 
         # Create progress dialog
         dialog = QDialog(self)
-        dialog.setWindowTitle("Running Analysis")
+        title = "Running Analysis (Limited to 100)" if limit else "Running Analysis"
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
         dialog.resize(600, 400)
 
@@ -428,6 +492,10 @@ class MainWindow(QMainWindow):
             finished = pyqtSignal(str)
             error = pyqtSignal(str)
 
+            def __init__(self, limit):
+                super().__init__()
+                self.limit = limit
+
             def run(self):
                 try:
                     runner = AnalysisRunner()
@@ -435,26 +503,29 @@ class MainWindow(QMainWindow):
                     def callback(msg):
                         self.progress.emit(msg)
 
-                    output_path = runner.run_full_analysis(progress_callback=callback)
+                    output_path = runner.run_full_analysis(
+                        progress_callback=callback,
+                        limit=self.limit
+                    )
                     self.finished.emit(str(output_path))
                 except Exception as e:
                     self.error.emit(str(e))
 
         # Create and connect thread
-        thread = AnalysisThread()
+        thread = AnalysisThread(limit)
 
         def on_progress(msg):
             progress_text.append(msg)
 
-        def on_finished(output_path):
+        def on_finished(images_saved):
             progress_text.append(f"\n✓ Analysis complete!")
-            progress_text.append(f"CSV saved to: {output_path}")
+            progress_text.append(f"Saved {images_saved} images to database")
             close_button.setEnabled(True)
-            self.status_bar.showMessage(f"Analysis complete: {output_path}")
 
             # Reload data in browser
             try:
-                self.data_browser.reload_data(output_path)
+                self.data_browser.reload_data()
+                self.update_db_status()
             except Exception:
                 pass
 
@@ -483,9 +554,429 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Debug logging disabled")
 
     def _on_view_log(self) -> None:
-        """Handle view log action"""
+        """Handle view log action - non-blocking"""
+        # Create and show non-modal dialog
         dialog = LogViewerDialog(self)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_db_full_scan(self) -> None:
+        """Handle full scan images to database action"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QProgressBar
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from utils.analysis_runner import AnalysisRunner
+
+        # Check if limit is enabled
+        limit = 100 if self.action_limit_100.isChecked() else None
+
+        # Create progress dialog
+        dialog = QDialog(self)
+        title = "Scanning Images (Limited to 100)" if limit else "Scanning Images"
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(400)
+
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+
+        # Progress text
+        progress_text = QTextEdit()
+        progress_text.setReadOnly(True)
+        layout.addWidget(progress_text)
+
+        # Close button (disabled initially)
+        close_button = QPushButton("Close")
+        close_button.setEnabled(False)
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+
+        # Thread for scanning
+        class ScanThread(QThread):
+            progress = pyqtSignal(str)
+            finished = pyqtSignal(int)
+            error = pyqtSignal(str)
+
+            def __init__(self, limit):
+                super().__init__()
+                self.limit = limit
+
+            def run(self):
+                try:
+                    runner = AnalysisRunner()
+                    images_added = runner.scan_images_to_database(
+                        progress_callback=lambda msg: self.progress.emit(msg),
+                        limit=self.limit
+                    )
+                    self.finished.emit(images_added)
+                except Exception as e:
+                    self.error.emit(str(e))
+
+        thread = ScanThread(limit)
+
+        def on_progress(message):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                progress_text.append(message)
+
+        def on_finished(images_added):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                progress_text.append(f"\n✓ Scan complete! Added {images_added} images to database")
+            if close_button:
+                close_button.setEnabled(True)
+
+            # Reload data in browser
+            try:
+                self.data_browser.reload_data()
+                self.update_db_status()
+            except Exception:
+                pass
+
+        def on_error(error_msg):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                progress_text.append(f"\n✗ Error: {error_msg}")
+            if close_button:
+                close_button.setEnabled(True)
+
+        def on_dialog_close():
+            # Wait for thread to finish before closing
+            if thread.isRunning():
+                thread.wait()
+
+        thread.progress.connect(on_progress)
+        thread.finished.connect(on_finished)
+        thread.error.connect(on_error)
+        dialog.finished.connect(on_dialog_close)
+
+        # Start scan
+        thread.start()
         dialog.exec()
+
+    def _on_db_quick_scan(self) -> None:
+        """Handle quick scan images to database action"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from utils.analysis_runner import AnalysisRunner
+
+        # Check if limit is enabled
+        limit = 100 if self.action_limit_100.isChecked() else None
+
+        # Create progress dialog
+        dialog = QDialog(self)
+        title = "Quick Scanning Images (Limited to 100)" if limit else "Quick Scanning Images"
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(400)
+
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+
+        # Progress text
+        progress_text = QTextEdit()
+        progress_text.setReadOnly(True)
+        layout.addWidget(progress_text)
+
+        # Close button (disabled initially)
+        close_button = QPushButton("Close")
+        close_button.setEnabled(False)
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+
+        # Thread for scanning
+        class QuickScanThread(QThread):
+            progress = pyqtSignal(str)
+            finished = pyqtSignal(dict)
+            error = pyqtSignal(str)
+
+            def __init__(self, limit):
+                super().__init__()
+                self.limit = limit
+
+            def run(self):
+                try:
+                    runner = AnalysisRunner()
+                    result = runner.quick_scan_images_to_database(
+                        progress_callback=lambda msg: self.progress.emit(msg),
+                        limit=self.limit
+                    )
+                    self.finished.emit(result)
+                except Exception as e:
+                    self.error.emit(str(e))
+
+        thread = QuickScanThread(limit)
+
+        def on_progress(message):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                progress_text.append(message)
+
+        def on_finished(result):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                added = result.get('added', 0)
+                skipped = result.get('skipped', 0)
+                progress_text.append(
+                    f"\n✓ Quick scan complete!\n"
+                    f"  • Added: {added} new images\n"
+                    f"  • Skipped: {skipped} existing images"
+                )
+            if close_button:
+                close_button.setEnabled(True)
+
+            # Reload data in browser
+            try:
+                self.data_browser.reload_data()
+                self.update_db_status()
+            except Exception:
+                pass
+
+        def on_error(error_msg):
+            # Check if widgets still exist
+            if progress_text and not progress_text.isHidden():
+                progress_text.append(f"\n✗ Error: {error_msg}")
+            if close_button:
+                close_button.setEnabled(True)
+
+        def on_dialog_close():
+            # Wait for thread to finish before closing
+            if thread.isRunning():
+                thread.wait()
+
+        thread.progress.connect(on_progress)
+        thread.finished.connect(on_finished)
+        thread.error.connect(on_error)
+        dialog.finished.connect(on_dialog_close)
+
+        # Start quick scan
+        thread.start()
+        dialog.exec()
+
+    def _on_load_new(self) -> None:
+        """Handle load new images with analysis action (non-blocking)"""
+        from PyQt6.QtCore import QThread, pyqtSignal, QTimer
+        from PyQt6.QtWidgets import QMessageBox
+        from utils.analysis_runner import AnalysisRunner
+
+        # Check if already loading
+        if hasattr(self, '_load_thread') and self._load_thread and self._load_thread.isRunning():
+            QMessageBox.warning(self, "Load in Progress", "Image loading is already in progress.")
+            return
+
+        # Check if limit is enabled
+        limit = 100 if self.action_limit_100.isChecked() else None
+
+        # Thread for loading
+        class LoadThread(QThread):
+            progress = pyqtSignal(str)
+            finished_signal = pyqtSignal(dict)
+            error = pyqtSignal(str)
+
+            def __init__(self, limit):
+                super().__init__()
+                self.limit = limit
+
+            def run(self):
+                try:
+                    runner = AnalysisRunner()
+                    result = runner.load_new_images(
+                        progress_callback=lambda msg: self.progress.emit(msg),
+                        limit=self.limit
+                    )
+                    self.finished_signal.emit(result)
+                except Exception as e:
+                    self.error.emit(str(e))
+
+        self._load_thread = LoadThread(limit)
+
+        # Timer to refresh data browser periodically during loading
+        self._refresh_timer = QTimer()
+        self._refresh_timer.timeout.connect(self._refresh_during_load)
+
+        def on_progress(message):
+            # Update status bar with progress
+            self.status_bar.showMessage(f"Loading: {message}", 3000)
+
+        def on_finished(result):
+            # Stop refresh timer
+            if hasattr(self, '_refresh_timer'):
+                self._refresh_timer.stop()
+
+            # Final refresh
+            try:
+                self.data_browser.reload_data()
+                self.update_db_status()
+            except Exception:
+                pass
+
+            # Show completion message in status bar
+            added = result.get('added', 0)
+            skipped = result.get('skipped', 0)
+            self.status_bar.showMessage(
+                f"✓ Load complete! Added {added} images, skipped {skipped} existing",
+                10000
+            )
+
+        def on_error(error_msg):
+            # Stop refresh timer
+            if hasattr(self, '_refresh_timer'):
+                self._refresh_timer.stop()
+
+            # Show error in status bar
+            self.status_bar.showMessage(f"✗ Error: {error_msg}", 10000)
+
+            # Also show error dialog
+            QMessageBox.critical(self, "Load Failed", f"Failed to load images:\n{error_msg}")
+
+        self._load_thread.progress.connect(on_progress)
+        self._load_thread.finished_signal.connect(on_finished)
+        self._load_thread.error.connect(on_error)
+
+        # Start refresh timer (refresh every 2 seconds)
+        self._refresh_timer.start(2000)
+
+        # Start loading in background
+        self._load_thread.start()
+
+        # Show initial status
+        limit_msg = f" (limited to {limit})" if limit else ""
+        self.status_bar.showMessage(f"Loading new images{limit_msg}...", 3000)
+
+    def _refresh_during_load(self):
+        """Refresh data browser during background loading"""
+        try:
+            self.data_browser.reload_data()
+            self.update_db_status()
+        except Exception:
+            pass
+
+    def _on_db_stats(self) -> None:
+        """Handle view database statistics action"""
+        from utils.db_manager import get_db_manager
+
+        db = get_db_manager()
+        stats = db.get_stats()
+
+        # Format statistics message
+        msg = f"""Database Statistics:
+
+Total Images: {stats['total_images']}
+Analyzed Images: {stats['analyzed_images']}
+Archived Images: {stats['archived_images']}
+Cameras: {stats['cameras']}
+
+Database Location:
+{db.db_path}
+"""
+
+        QMessageBox.information(self, "Database Statistics", msg)
+
+    def _on_db_export(self) -> None:
+        """Handle export database to CSV action"""
+        from utils.db_manager import get_db_manager
+        import pandas as pd
+
+        # Get save file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Database to CSV",
+            "database_export.csv",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            db = get_db_manager()
+            data_list = db.get_all_analysis_data(include_archived=False)
+
+            if not data_list:
+                QMessageBox.warning(
+                    self,
+                    "Export Failed",
+                    "No data to export. Database is empty."
+                )
+                return
+
+            # Convert to DataFrame and save
+            df = pd.DataFrame(data_list)
+            df.to_csv(file_path, index=False)
+
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Exported {len(data_list)} records to:\n{file_path}"
+            )
+            self.update_db_status()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Failed to export database:\n{str(e)}"
+            )
+
+    def _on_db_refresh(self) -> None:
+        """Handle refresh data from database action"""
+        try:
+            self.data_browser.reload_data()
+            self.plot_viewer.refresh_data()
+            self.update_db_status()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Refresh Failed",
+                f"Failed to refresh data:\n{str(e)}"
+            )
+
+    def _on_db_clear(self) -> None:
+        """Handle clear database action"""
+        from utils.db_manager import get_db_manager
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            "Clear Database",
+            "This will delete ALL data from the database.\n\n"
+            "This action cannot be undone!\n\n"
+            "Are you sure you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            db = get_db_manager()
+
+            # Delete all records
+            with db.get_connection() as conn:
+                conn.execute("DELETE FROM exif_data")
+                conn.execute("DELETE FROM analysis_results")
+                conn.execute("DELETE FROM images")
+                conn.execute("DELETE FROM cameras")
+
+            # Refresh UI
+            self.data_browser.reload_data()
+            self.plot_viewer.refresh_data()
+            self.update_db_status()
+
+            QMessageBox.information(
+                self,
+                "Database Cleared",
+                "All data has been removed from the database."
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Clear Failed",
+                f"Failed to clear database:\n{str(e)}"
+            )
 
     def _on_row_selected(self, row_index: int) -> None:
         """Handle row selection in data browser"""
@@ -562,3 +1053,23 @@ class MainWindow(QMainWindow):
             message: Information message
         """
         QMessageBox.information(self, title, message)
+
+    def update_db_status(self) -> None:
+        """Update status bar with database information"""
+        try:
+            from utils.db_manager import get_db_manager
+
+            db = get_db_manager()
+            stats = db.get_stats()
+
+            active_images = stats['total_images'] - stats['archived_images']
+            msg = f"Database: {active_images} images ({stats['cameras']} cameras)"
+
+            if stats['archived_images'] > 0:
+                msg += f" | {stats['archived_images']} archived"
+
+            self.status_bar.showMessage(msg)
+
+        except Exception:
+            # Silently fail if database not available
+            pass

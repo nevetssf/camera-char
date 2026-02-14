@@ -79,14 +79,14 @@ class AppController(QObject):
     def _initialize_data_model(self) -> None:
         """Initialize data model"""
         try:
-            self.data_model = DataModel(csv_path='aggregate_analysis.csv')
+            self.data_model = DataModel()
             self.status_message.emit(
-                f"Loaded {self.data_model.get_total_row_count()} records"
+                f"Loaded {self.data_model.get_total_row_count()} records from database"
             )
         except Exception as e:
             self.error_occurred.emit(
                 "Data Loading Error",
-                f"Failed to load aggregate_analysis.csv:\n{str(e)}"
+                f"Failed to load data from database:\n{str(e)}"
             )
 
     def _connect_signals(self) -> None:
@@ -102,11 +102,8 @@ class AppController(QObject):
         data_browser.data_filtered.connect(self._on_data_filtered)
 
         # Connect plot viewer signals
-        self.main_window.plot_ev_iso.plot_updated.connect(
-            lambda: self.status_message.emit("EV vs ISO plot updated")
-        )
-        self.main_window.plot_ev_time.plot_updated.connect(
-            lambda: self.status_message.emit("EV vs Time plot updated")
+        self.main_window.plot_viewer.plot_updated.connect(
+            lambda: self.status_message.emit("Plot updated")
         )
 
         # Connect image viewer signals
@@ -182,11 +179,9 @@ class AppController(QObject):
             f"Filtered: {filtered_count} of {total_count} records"
         )
 
-        # Update plot viewers with filtered cameras
-        selected_cameras = self.main_window.data_browser.get_selected_cameras()
-        if selected_cameras:
-            self.main_window.plot_ev_iso.set_camera_filter(selected_cameras)
-            self.main_window.plot_ev_time.set_camera_filter(selected_cameras)
+        # Auto-regenerate plot with filtered data
+        filtered_data = self.main_window.data_browser.data_model.get_data()
+        self.main_window.plot_viewer.generate_plot_from_data(filtered_data)
 
     def load_image_background(self, file_path: str,
                             camera_model: Optional[str] = None,
@@ -255,14 +250,13 @@ class AppController(QObject):
     def reload_data(self) -> None:
         """Reload all data from sources"""
         try:
-            # Reload data model
-            self.data_model = DataModel(csv_path='aggregate_analysis.csv')
+            # Reload data model from database
+            self.data_model = DataModel()
             self.main_window.data_browser.reload_data()
 
             # Reload plot generator
             self.plot_generator.reload_data()
-            self.main_window.plot_ev_iso.refresh_data()
-            self.main_window.plot_ev_time.refresh_data()
+            self.main_window.plot_viewer.refresh_data()
 
             self.status_message.emit("Data reloaded successfully")
 

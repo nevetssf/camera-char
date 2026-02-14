@@ -11,6 +11,7 @@ from pathlib import Path
 from models.data_model import DataModel
 from utils.plot_generator import get_plot_generator
 from utils.image_loader import get_image_loader
+from views.image_window import ImageWindow
 
 
 class BackgroundImageLoader(QThread):
@@ -71,6 +72,9 @@ class AppController(QObject):
         self.image_loader = get_image_loader()
 
         self.background_loader: Optional[BackgroundImageLoader] = None
+
+        # Create image viewer window (reusable, persists across image loads)
+        self.image_window = ImageWindow(main_window)
 
         # Initialize
         self._initialize_data_model()
@@ -149,20 +153,42 @@ class AppController(QObject):
 
     def _load_image_for_row(self, file_path: str, camera_model: str) -> None:
         """
-        Load image for selected row.
+        Load image for selected row and open in popup window.
 
         Args:
             file_path: Path to image file
             camera_model: Camera model name
         """
         try:
-            # Load in main thread (could be moved to background)
-            self.main_window.image_viewer.load_image(
+            from PyQt6.QtGui import QPixmap, QImage
+            from utils.image_loader import normalize_for_display
+
+            # Load the image using image loader
+            image_array = self.image_loader.load_image(
                 file_path,
                 fast_preview=False,
                 camera_model=camera_model
             )
-            self.main_window.tab_widget.setCurrentIndex(0)  # Switch to image viewer
+
+            # Normalize for display
+            display_array = normalize_for_display(image_array)
+
+            # Convert to QPixmap
+            height, width = display_array.shape[:2]
+            if len(display_array.shape) == 3:
+                bytes_per_line = 3 * width
+                qimage = QImage(display_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            else:
+                bytes_per_line = width
+                qimage = QImage(display_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+
+            pixmap = QPixmap.fromImage(qimage)
+
+            # Open image window with loaded image
+            self.image_window.load_image(pixmap, display_array, file_path)
+            self.image_window.show()
+            self.image_window.raise_()
+            self.image_window.activateWindow()
 
         except Exception as e:
             self.error_occurred.emit(

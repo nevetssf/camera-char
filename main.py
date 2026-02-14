@@ -14,24 +14,33 @@ from pathlib import Path
 # Version tracking
 VERSION = "0.1"
 
+
+def _set_macos_app_name(name: str) -> None:
+    """Set the application name in macOS menu bar and Dock tooltip."""
+    try:
+        from AppKit import NSApplication
+        from Foundation import NSBundle
+
+        # Get the shared application
+        app = NSApplication.sharedApplication()
+
+        # Modify the bundle info
+        bundle = NSBundle.mainBundle()
+        info = bundle.infoDictionary()
+        info['CFBundleName'] = name
+        info['CFBundleDisplayName'] = name
+        info['CFBundleExecutable'] = name
+
+        # Try to force Dock to update
+        app.setActivationPolicy_(0)  # NSApplicationActivationPolicyRegular
+
+    except ImportError:
+        pass  # PyObjC not available
+
+
 # Set macOS app name BEFORE any Qt imports
 if sys.platform == 'darwin':
-    try:
-        import objc
-        from Foundation import NSBundle, NSMutableDictionary
-
-        # Get the main bundle
-        bundle = NSBundle.mainBundle()
-        if bundle:
-            # Get the info dictionary
-            info = bundle.infoDictionary()
-            if info:
-                # Set the app name
-                info['CFBundleName'] = 'Sensor Analysis'
-                info['CFBundleDisplayName'] = 'Sensor Analysis'
-                info['CFBundleExecutable'] = 'Sensor Analysis'
-    except:
-        pass
+    _set_macos_app_name("Sensor Analysis")
 
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -112,28 +121,6 @@ def setup_application() -> QApplication:
     # Set application icon
     app_icon = create_app_icon()
     app.setWindowIcon(app_icon)
-
-    # On macOS, aggressively set the app name using multiple methods
-    if sys.platform == 'darwin':
-        try:
-            from Foundation import NSProcessInfo
-            from AppKit import NSRunningApplication, NSApplicationActivationPolicyRegular
-
-            # Set process name
-            processInfo = NSProcessInfo.processInfo()
-            processInfo.setProcessName_("Sensor Analysis")
-
-            # Try to set the running application's localized name
-            currentApp = NSRunningApplication.currentApplication()
-            if currentApp:
-                try:
-                    # This is read-only, but trying anyway
-                    currentApp.localizedName = "Sensor Analysis"
-                except:
-                    pass
-
-        except ImportError:
-            pass  # pyobjc not available
 
     return app
 

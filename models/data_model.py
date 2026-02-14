@@ -1,6 +1,6 @@
 """
 Data model for managing aggregate camera analysis data.
-Handles loading CSV data and provides filtering capabilities.
+Handles loading data from database and provides filtering capabilities.
 """
 
 import pandas as pd
@@ -9,38 +9,44 @@ from pathlib import Path
 
 
 class DataModel:
-    """Model for camera sensor analysis data from aggregate_analysis.csv"""
+    """Model for camera sensor analysis data from database"""
 
-    def __init__(self, csv_path: str = 'aggregate_analysis.csv'):
-        """
-        Initialize the data model.
-
-        Args:
-            csv_path: Path to aggregate_analysis.csv file
-        """
-        self.csv_path = Path(csv_path)
+    def __init__(self):
+        """Initialize the data model."""
         self.full_data: Optional[pd.DataFrame] = None
         self.filtered_data: Optional[pd.DataFrame] = None
         self._load_data()
 
     def _load_data(self) -> None:
-        """Load the CSV data into a pandas DataFrame"""
-        if not self.csv_path.exists():
-            raise FileNotFoundError(f"CSV file not found: {self.csv_path}")
+        """Load data from database into a pandas DataFrame"""
+        from utils.db_manager import get_db_manager
 
-        self.full_data = pd.read_csv(self.csv_path)
+        db = get_db_manager()
+        data_list = db.get_all_analysis_data(include_archived=False)
+
+        if not data_list:
+            # Create empty DataFrame with expected columns
+            self.full_data = pd.DataFrame(columns=[
+                'camera', 'iso', 'exposure_time', 'ev', 'source', 'filename',
+                'xdim', 'ydim', 'megapixels', 'bits_per_sample',
+                'black_level', 'white_level'
+            ])
+            self.filtered_data = self.full_data.copy()
+            return
+
+        self.full_data = pd.DataFrame(data_list)
         self.filtered_data = self.full_data.copy()
 
         # Ensure required columns exist
-        required_cols = ['camera', 'iso', 'time']
+        required_cols = ['camera', 'iso', 'exposure_time']
         missing = [col for col in required_cols if col not in self.full_data.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Add exposure_time alias for consistency
-        if 'time' in self.full_data.columns and 'exposure_time' not in self.full_data.columns:
-            self.full_data['exposure_time'] = self.full_data['time']
-            self.filtered_data['exposure_time'] = self.filtered_data['time']
+        # Add 'time' alias for backward compatibility
+        if 'exposure_time' in self.full_data.columns and 'time' not in self.full_data.columns:
+            self.full_data['time'] = self.full_data['exposure_time']
+            self.filtered_data['time'] = self.filtered_data['exposure_time']
 
     def get_data(self) -> pd.DataFrame:
         """Get the currently filtered data"""
@@ -169,7 +175,25 @@ class DataModel:
         """Get list of unique exposure times in the full dataset"""
         if self.full_data is None:
             return []
-        return sorted(self.full_data['exposure_time'].unique().tolist())
+        return sorted([x for x in self.full_data['exposure_time'].unique().tolist() if pd.notna(x)])
+
+    def get_unique_exposure_settings(self) -> List[int]:
+        """Get list of unique exposure settings in the full dataset"""
+        if self.full_data is None:
+            return []
+        return sorted([int(x) for x in self.full_data['exposure_setting'].unique().tolist() if pd.notna(x)])
+
+    def get_unique_bit_depths(self) -> List[int]:
+        """Get list of unique bit depths in the full dataset"""
+        if self.full_data is None:
+            return []
+        return sorted([x for x in self.full_data['bits_per_sample'].unique().tolist() if pd.notna(x)])
+
+    def get_unique_megapixels(self) -> List[float]:
+        """Get list of unique megapixel values in the full dataset"""
+        if self.full_data is None:
+            return []
+        return sorted([x for x in self.full_data['megapixels'].unique().tolist() if pd.notna(x)])
 
     def get_row_count(self) -> int:
         """Get the number of rows in filtered data"""
@@ -193,6 +217,22 @@ class DataModel:
             raise IndexError(f"Row index {index} out of range")
 
         return self.filtered_data.iloc[index]
+
+    def filter_by_multiple_fields(self, filters: dict) -> None:
+        """
+        Filter data by multiple fields.
+
+        Args:
+            filters: Dictionary mapping field names to list of values to include
+                    e.g. {'camera': ['Leica M11'], 'iso': [100, 200]}
+        """
+        data = self.full_data.copy()
+
+        for field, values in filters.items():
+            if values:  # Only apply if values are selected
+                data = data[data[field].isin(values)]
+
+        self.filtered_data = data
 
     def export_filtered_data(self, output_path: str) -> None:
         """

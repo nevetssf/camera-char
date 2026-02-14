@@ -66,7 +66,7 @@ class AppLogger:
 
         # Initial log message
         self.info("=" * 60)
-        self.info(f"Camera Sensor Analyzer - Session started")
+        self.info(f"Sensor Analysis - Session started")
         self.info(f"Log file: {self.log_file_path}")
         self.info("=" * 60)
 

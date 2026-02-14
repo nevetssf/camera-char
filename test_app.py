@@ -16,13 +16,13 @@ print("1. Testing Data Model...")
 try:
     from models.data_model import DataModel
 
-    data_model = DataModel('aggregate_analysis.csv')
+    data_model = DataModel()
     total_rows = data_model.get_total_row_count()
     cameras = data_model.get_unique_cameras()
     isos = data_model.get_unique_isos()
     times = data_model.get_unique_exposure_times()
 
-    print(f"   ✓ Loaded {total_rows} records")
+    print(f"   ✓ Loaded {total_rows} records from database")
     print(f"   ✓ {len(cameras)} cameras")
     print(f"   ✓ {len(isos)} ISO values")
     print(f"   ✓ {len(times)} exposure times")

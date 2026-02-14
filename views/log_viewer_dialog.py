@@ -92,7 +92,7 @@ class LogViewerDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.accept)
+        self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
 

@@ -94,23 +94,12 @@ class DataBrowser(QWidget):
     row_selected = pyqtSignal(int)  # Emitted when a row is selected
     data_filtered = pyqtSignal()    # Emitted when filters are applied
 
-    def __init__(self, csv_path: Optional[str] = None):
-        """
-        Initialize data browser.
-
-        Args:
-            csv_path: Path to aggregate_analysis.csv (uses config if None)
-        """
+    def __init__(self):
+        """Initialize data browser."""
         super().__init__()
 
-        # Get CSV path from config if not provided
-        if csv_path is None:
-            from utils.config_manager import get_config
-            config = get_config()
-            csv_path = str(config.get_aggregate_csv_path())
-
-        # Initialize data model
-        self.data_model = DataModel(csv_path=csv_path)
+        # Initialize data model (loads from database)
+        self.data_model = DataModel()
 
         # Source directory for raw files - get from config
         from utils.config_manager import get_config
@@ -142,20 +131,16 @@ class DataBrowser(QWidget):
         filter_group = self._create_filter_controls()
         layout.addWidget(filter_group)
 
-        # Browse button for source files
-        browse_layout = QHBoxLayout()
-        browse_label = QLabel("Source:")
-        self.browse_button = QPushButton("Browse...")
-        self.browse_button.clicked.connect(self._on_browse_source)
-        browse_layout.addWidget(browse_label)
-        browse_layout.addWidget(self.browse_button)
-        browse_layout.addStretch()
-        layout.addLayout(browse_layout)
-
-        # Source path label
+        # Source path label (read-only display)
+        source_label = QLabel("Source:")
         self.source_path_label = QLabel("No source directory selected")
         self.source_path_label.setStyleSheet("color: gray; font-style: italic;")
-        layout.addWidget(self.source_path_label)
+
+        source_layout = QHBoxLayout()
+        source_layout.addWidget(source_label)
+        source_layout.addWidget(self.source_path_label)
+        source_layout.addStretch()
+        layout.addLayout(source_layout)
 
         # Search box
         search_layout = QHBoxLayout()
@@ -182,53 +167,194 @@ class DataBrowser(QWidget):
         layout.addWidget(self.status_label)
 
     def _create_filter_controls(self) -> QGroupBox:
-        """Create filter control group"""
+        """Create filter control group with 3 customizable columns"""
         group = QGroupBox("Filters")
-        layout = QVBoxLayout()
-        group.setLayout(layout)
+        main_layout = QVBoxLayout()
+        group.setLayout(main_layout)
 
-        # Camera filter
-        camera_layout = QHBoxLayout()
-        camera_label = QLabel("Cameras:")
-        self.camera_list = QListWidget()
-        self.camera_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self.camera_list.setMaximumHeight(120)
-        self.camera_list.itemSelectionChanged.connect(self._on_filter_changed)
-        camera_layout.addWidget(camera_label)
-        camera_layout.addWidget(self.camera_list)
-        layout.addLayout(camera_layout)
+        # Filter options (limited to 4 choices)
+        self.filter_options = [
+            ('camera', 'Camera'),
+            ('iso', 'ISO'),
+            ('exposure_setting', 'Exposure Setting'),
+            ('exposure_time', 'Exposure Time'),
+        ]
 
-        # ISO filter
-        iso_layout = QHBoxLayout()
-        iso_label = QLabel("ISOs:")
-        self.iso_list = QListWidget()
-        self.iso_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self.iso_list.setMaximumHeight(100)
-        self.iso_list.itemSelectionChanged.connect(self._on_filter_changed)
-        iso_layout.addWidget(iso_label)
-        iso_layout.addWidget(self.iso_list)
-        layout.addLayout(iso_layout)
+        # Create 3 filter columns
+        columns_layout = QHBoxLayout()
+
+        self.filter_columns = []
+        for i in range(3):
+            col_widget, col_data = self._create_filter_column(i)
+            self.filter_columns.append(col_data)
+            columns_layout.addWidget(col_widget)
+
+        main_layout.addLayout(columns_layout)
 
         # Reset button
         self.reset_button = QPushButton("Reset Filters")
         self.reset_button.clicked.connect(self._on_reset_filters)
-        layout.addWidget(self.reset_button)
+        main_layout.addWidget(self.reset_button)
 
         return group
 
+    def _create_filter_column(self, index: int) -> tuple:
+        """Create a single filter column"""
+        # Default filters: camera, iso, exposure_setting
+        default_filters = ['camera', 'iso', 'exposure_setting']
+        default_filter = default_filters[index] if index < len(default_filters) else 'camera'
+
+        col_widget = QWidget()
+        col_layout = QVBoxLayout()
+        col_widget.setLayout(col_layout)
+
+        # Dropdown to select filter type
+        type_combo = QComboBox()
+        # Initially populate with all options (will be filtered later)
+        self._populate_filter_type_combo(type_combo, index, default_filter)
+
+        type_combo.currentIndexChanged.connect(lambda: self._on_filter_type_changed(index))
+
+        col_layout.addWidget(type_combo)
+
+        # List widget for filter values
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        list_widget.setMaximumHeight(200)
+        list_widget.itemSelectionChanged.connect(lambda: self._on_filter_changed(index))
+        col_layout.addWidget(list_widget)
+
+        return col_widget, {
+            'type_combo': type_combo,
+            'list_widget': list_widget,
+            'current_type': default_filter
+        }
+
+    def _populate_filter_type_combo(self, combo: QComboBox, column_index: int, current_selection: str = None) -> None:
+        """
+        Populate filter type combo, excluding filters already selected in previous columns.
+
+        Args:
+            combo: The QComboBox to populate
+            column_index: Index of this column (0, 1, or 2)
+            current_selection: Current selection to maintain (optional)
+        """
+        # Get filter types already selected in previous columns
+        excluded_types = set()
+        for i in range(column_index):
+            if i < len(self.filter_columns):
+                excluded_types.add(self.filter_columns[i]['current_type'])
+
+        # Clear and repopulate combo
+        combo.blockSignals(True)  # Prevent triggering change events
+        combo.clear()
+
+        selected_idx = 0
+        for idx, (key, label) in enumerate(self.filter_options):
+            if key not in excluded_types:
+                combo.addItem(label, key)
+                if key == current_selection:
+                    selected_idx = combo.count() - 1
+
+        # Set the current selection
+        if combo.count() > 0:
+            combo.setCurrentIndex(selected_idx)
+
+        combo.blockSignals(False)
+
+    def _on_filter_type_changed(self, column_index: int) -> None:
+        """Handle filter type change"""
+        col_data = self.filter_columns[column_index]
+        combo = col_data['type_combo']
+        new_type = combo.currentData()
+        col_data['current_type'] = new_type
+
+        # Repopulate type combos in subsequent columns to exclude this selection
+        for i in range(column_index + 1, len(self.filter_columns)):
+            next_col_data = self.filter_columns[i]
+            current_selection = next_col_data['current_type']
+            self._populate_filter_type_combo(next_col_data['type_combo'], i, current_selection)
+            # Update current_type in case it changed
+            next_col_data['current_type'] = next_col_data['type_combo'].currentData()
+
+        # Repopulate the list with new filter values
+        self._populate_filter_column(column_index)
+
+        # Repopulate subsequent filter value lists
+        for i in range(column_index + 1, len(self.filter_columns)):
+            self._populate_filter_column(i)
+
+        # Reapply filters
+        self._on_filter_changed(column_index)
+
+    def _populate_filter_column(self, column_index: int) -> None:
+        """Populate a filter column with values based on previous filters (cascading)"""
+        col_data = self.filter_columns[column_index]
+        filter_type = col_data['current_type']
+        list_widget = col_data['list_widget']
+
+        list_widget.clear()
+
+        # Get data filtered by previous columns (cascading filter)
+        if column_index == 0:
+            # First column: use full dataset
+            data_source = self.data_model.full_data
+        else:
+            # Subsequent columns: apply filters from previous columns only
+            filters = {}
+            for i in range(column_index):
+                prev_col_data = self.filter_columns[i]
+                prev_filter_type = prev_col_data['current_type']
+                prev_list_widget = prev_col_data['list_widget']
+
+                selected_items = prev_list_widget.selectedItems()
+                if selected_items:
+                    selected_values = [
+                        item.data(Qt.ItemDataRole.UserRole) for item in selected_items
+                    ]
+                    filters[prev_filter_type] = selected_values
+
+            # Apply previous filters to get data source
+            if filters:
+                data_source = self.data_model.full_data.copy()
+                for field, values in filters.items():
+                    data_source = data_source[data_source[field].isin(values)]
+            else:
+                data_source = self.data_model.full_data
+
+        # Get unique values from the filtered data source
+        if filter_type == 'camera':
+            values = sorted(data_source['camera'].unique().tolist()) if 'camera' in data_source.columns else []
+            items = [str(v) for v in values]
+        elif filter_type == 'iso':
+            values = sorted([x for x in data_source['iso'].unique().tolist() if pd.notna(x)]) if 'iso' in data_source.columns else []
+            items = [str(v) for v in values]
+        elif filter_type == 'exposure_time':
+            values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)]) if 'exposure_time' in data_source.columns else []
+            items = [f"{v:.6f}s" for v in values]
+        elif filter_type == 'exposure_setting':
+            values = sorted([int(x) for x in data_source['exposure_setting'].unique().tolist() if pd.notna(x)]) if 'exposure_setting' in data_source.columns else []
+            items = [f"1/{v}" for v in values]
+        elif filter_type == 'bits_per_sample':
+            values = sorted([x for x in data_source['bits_per_sample'].unique().tolist() if pd.notna(x)]) if 'bits_per_sample' in data_source.columns else []
+            items = [f"{v} bit" for v in values]
+        elif filter_type == 'megapixels':
+            values = sorted([x for x in data_source['megapixels'].unique().tolist() if pd.notna(x)]) if 'megapixels' in data_source.columns else []
+            items = [f"{v:.1f} MP" for v in values]
+        else:
+            values = []
+            items = []
+
+        # Store actual values as item data
+        for value, display in zip(values, items):
+            list_widget.addItem(display)
+            list_widget.item(list_widget.count() - 1).setData(Qt.ItemDataRole.UserRole, value)
+
     def _load_initial_data(self) -> None:
         """Load initial data into table and populate filters"""
-        # Populate camera list
-        cameras = self.data_model.get_unique_cameras()
-        self.camera_list.clear()
-        for camera in cameras:
-            self.camera_list.addItem(camera)
-
-        # Populate ISO list
-        isos = self.data_model.get_unique_isos()
-        self.iso_list.clear()
-        for iso in isos:
-            self.iso_list.addItem(str(iso))
+        # Populate all filter columns
+        for i in range(len(self.filter_columns)):
+            self._populate_filter_column(i)
 
         # Update source path label if directory was set
         if self.source_directory:
@@ -270,23 +396,44 @@ class DataBrowser(QWidget):
         # Resize columns to content
         self.table_view.resizeColumnsToContents()
 
-    def _on_filter_changed(self) -> None:
+    def _on_filter_changed(self, column_index: Optional[int] = None) -> None:
         """Handle filter selection change"""
-        # Get selected cameras
-        selected_cameras = [
-            item.text() for item in self.camera_list.selectedItems()
-        ]
+        # Repopulate subsequent filter columns (cascading effect)
+        if column_index is not None:
+            for i in range(column_index + 1, len(self.filter_columns)):
+                # Save current selection
+                col_data = self.filter_columns[i]
+                list_widget = col_data['list_widget']
+                selected_values = [
+                    item.data(Qt.ItemDataRole.UserRole) for item in list_widget.selectedItems()
+                ]
 
-        # Get selected ISOs
-        selected_isos = [
-            int(item.text()) for item in self.iso_list.selectedItems()
-        ]
+                # Repopulate with cascaded values
+                self._populate_filter_column(i)
 
-        # Apply filters
-        self.data_model.filter_combined(
-            cameras=selected_cameras if selected_cameras else None,
-            iso_values=selected_isos if selected_isos else None
-        )
+                # Restore selection where possible
+                for j in range(list_widget.count()):
+                    item = list_widget.item(j)
+                    if item.data(Qt.ItemDataRole.UserRole) in selected_values:
+                        item.setSelected(True)
+
+        # Collect filters from all columns
+        filters = {}
+
+        for col_data in self.filter_columns:
+            filter_type = col_data['current_type']
+            list_widget = col_data['list_widget']
+
+            selected_items = list_widget.selectedItems()
+            if selected_items:
+                # Get actual values from item data
+                selected_values = [
+                    item.data(Qt.ItemDataRole.UserRole) for item in selected_items
+                ]
+                filters[filter_type] = selected_values
+
+        # Apply combined filters
+        self.data_model.filter_by_multiple_fields(filters)
 
         # Update table
         self._update_table()
@@ -306,9 +453,10 @@ class DataBrowser(QWidget):
 
     def _on_reset_filters(self) -> None:
         """Handle reset filters button"""
-        # Clear selections
-        self.camera_list.clearSelection()
-        self.iso_list.clearSelection()
+        # Clear selections in all filter columns
+        for col_data in self.filter_columns:
+            col_data['list_widget'].clearSelection()
+
         self.search_input.clear()
 
         # Reset data model
@@ -331,30 +479,15 @@ class DataBrowser(QWidget):
         # Could open image viewer or details dialog
         self.row_selected.emit(row)
 
-    def _on_browse_source(self) -> None:
-        """Handle browse source button click"""
-        # Start in current source directory if set
-        start_dir = self.source_directory if self.source_directory else ""
-
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Select Source Directory",
-            start_dir,
-            QFileDialog.Option.ShowDirsOnly
-        )
-
-        if directory:
-            self.source_directory = directory
-            self.source_path_label.setText(f"📁 {directory}")
-            self.source_path_label.setStyleSheet("color: black;")
-
     def _on_archive_file(self, row: int) -> None:
         """Handle archive button click for a row"""
         from pathlib import Path
         from utils.app_logger import get_logger
+        from utils.db_manager import get_db_manager
         import shutil
 
         logger = get_logger()
+        db = get_db_manager()
 
         try:
             # Get file path for the row
@@ -382,6 +515,9 @@ class DataBrowser(QWidget):
                 logger.warning(f"Archive failed: File does not exist: {file_path}")
                 return
 
+            # Get image record from database to get image_id
+            image_record = db.get_image_by_path(file_path_obj)
+
             # Create .archive directory in the same directory as the file
             archive_dir = file_path_obj.parent / ".archive"
             archive_dir.mkdir(exist_ok=True)
@@ -392,6 +528,14 @@ class DataBrowser(QWidget):
             logger.info(f"Moving {file_path_obj} to {destination}")
 
             shutil.move(str(file_path_obj), str(destination))
+
+            # Mark image as archived in database if found
+            if image_record:
+                db.mark_archived(image_record['id'], archived=True)
+                logger.info(f"Marked image ID {image_record['id']} as archived in database")
+
+            # Reload data to update the table (removes archived images)
+            self.reload_data()
 
             # Show success message
             from PyQt6.QtWidgets import QMessageBox
@@ -518,20 +662,22 @@ class DataBrowser(QWidget):
 
     def get_selected_cameras(self) -> List[str]:
         """Get list of selected camera models"""
-        return [item.text() for item in self.camera_list.selectedItems()]
+        for col_data in self.filter_columns:
+            if col_data['current_type'] == 'camera':
+                return [item.data(Qt.ItemDataRole.UserRole)
+                       for item in col_data['list_widget'].selectedItems()]
+        return []
 
     def get_selected_isos(self) -> List[int]:
         """Get list of selected ISO values"""
-        return [int(item.text()) for item in self.iso_list.selectedItems()]
+        for col_data in self.filter_columns:
+            if col_data['current_type'] == 'iso':
+                return [item.data(Qt.ItemDataRole.UserRole)
+                       for item in col_data['list_widget'].selectedItems()]
+        return []
 
-    def reload_data(self, csv_path: Optional[str] = None) -> None:
-        """
-        Reload data from CSV.
-
-        Args:
-            csv_path: New CSV path (optional)
-        """
-        if csv_path:
-            self.data_model = DataModel(csv_path=csv_path)
-
+    def reload_data(self) -> None:
+        """Reload data from database."""
+        # Create new data model instance (reloads from database)
+        self.data_model = DataModel()
         self._load_initial_data()

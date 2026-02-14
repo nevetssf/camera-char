@@ -79,9 +79,9 @@ class MainWindow(QMainWindow):
         self.action_set_working_dir.setStatusTip("Set working directory for analysis results")
         self.action_set_working_dir.triggered.connect(self._on_set_working_dir)
 
-        self.action_set_source_dir = QAction("Set Source Directory...", self)
-        self.action_set_source_dir.setStatusTip("Set source directory for raw images")
-        self.action_set_source_dir.triggered.connect(self._on_set_source_dir)
+        self.action_change_source = QAction("Change Image Source...", self)
+        self.action_change_source.setStatusTip("Change image source directory (will clear database)")
+        self.action_change_source.triggered.connect(self._on_change_source)
 
         self.action_view_settings = QAction("View Settings", self)
         self.action_view_settings.setStatusTip("View current settings")
@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
         # Database menu
         database_menu = menubar.addMenu("Database")
         database_menu.addAction(self.action_load_new)
+        database_menu.addAction(self.action_change_source)
         database_menu.addSeparator()
         database_menu.addAction(self.action_limit_100)
         database_menu.addSeparator()
@@ -171,7 +172,6 @@ class MainWindow(QMainWindow):
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
         settings_menu.addAction(self.action_set_working_dir)
-        settings_menu.addAction(self.action_set_source_dir)
         settings_menu.addSeparator()
         settings_menu.addAction(self.action_enable_logging)
         settings_menu.addAction(self.action_view_log)
@@ -380,41 +380,74 @@ class MainWindow(QMainWindow):
                     f"Failed to set working directory:\n{str(e)}"
                 )
 
-    def _on_set_source_dir(self) -> None:
-        """Handle set source directory action"""
+    def _on_change_source(self) -> None:
+        """Handle change image source action"""
         from utils.config_manager import get_config
+        from utils.db_manager import get_db_manager
 
         config = get_config()
         current_dir = str(config.get_source_dir()) if config.get_source_dir() else ""
 
+        # Select new directory
         directory = QFileDialog.getExistingDirectory(
             self,
-            "Select Source Directory (Raw Images)",
+            "Select New Image Source Directory",
             current_dir,
             QFileDialog.Option.ShowDirsOnly
         )
 
         if directory:
-            try:
-                config.set_source_dir(directory)
-                # Update data browser source directory
-                self.data_browser.source_directory = directory
-                self.data_browser.source_path_label.setText(f"📁 {directory}")
-                self.data_browser.source_path_label.setStyleSheet("color: black;")
+            # Warn user about database clearing
+            response = QMessageBox.warning(
+                self,
+                "Warning: Database Will Be Cleared",
+                f"Changing the image source will:\n\n"
+                f"• Clear all data from the current database\n"
+                f"• Set new source directory to:\n  {directory}\n\n"
+                f"This action cannot be undone.\n\n"
+                f"Do you want to continue?",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel
+            )
 
-                self.status_bar.showMessage(f"Source directory set to: {directory}")
-                QMessageBox.information(
-                    self,
-                    "Source Directory Updated",
-                    f"Source directory set to:\n{directory}\n\n"
-                    "Raw images will be loaded from here."
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error",
-                    f"Failed to set source directory:\n{str(e)}"
-                )
+            if response == QMessageBox.StandardButton.Ok:
+                try:
+                    # Drop database
+                    db = get_db_manager()
+                    with db.get_connection() as conn:
+                        conn.execute("DELETE FROM exif_data")
+                        conn.execute("DELETE FROM analysis_results")
+                        conn.execute("DELETE FROM images")
+                        conn.execute("DELETE FROM cameras")
+
+                    # Set new source directory
+                    config.set_source_dir(directory)
+
+                    # Update data browser display
+                    self.data_browser.source_directory = directory
+                    self.data_browser.source_path_label.setText(f"📁 {directory}")
+                    self.data_browser.source_path_label.setStyleSheet("color: black;")
+
+                    # Reload data browser (will show empty table)
+                    self.data_browser.reload_data()
+                    self.plot_viewer.refresh_data()
+                    self.update_db_status()
+
+                    self.status_bar.showMessage(f"Source changed to: {directory}. Database cleared.")
+
+                    QMessageBox.information(
+                        self,
+                        "Image Source Changed",
+                        f"Image source changed to:\n{directory}\n\n"
+                        "Database has been cleared.\n"
+                        "Use Database > Load New... to load images from the new source."
+                    )
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to change image source:\n{str(e)}"
+                    )
 
     def _on_view_settings(self) -> None:
         """Handle view settings action"""

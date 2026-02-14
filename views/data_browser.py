@@ -131,10 +131,15 @@ class DataBrowser(QWidget):
         filter_group = self._create_filter_controls()
         layout.addWidget(filter_group)
 
-        # Source path label (read-only display)
+        # Source path label (clickable to open in Finder)
         source_label = QLabel("Source:")
         self.source_path_label = QLabel("No source directory selected")
-        self.source_path_label.setStyleSheet("color: gray; font-style: italic;")
+        self.source_path_label.setStyleSheet(
+            "color: #0066cc; font-style: italic; text-decoration: underline;"
+        )
+        self.source_path_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.source_path_label.setToolTip("Click to open in Finder/File Explorer")
+        self.source_path_label.mousePressEvent = self._on_source_path_clicked
 
         source_layout = QHBoxLayout()
         source_layout.addWidget(source_label)
@@ -478,6 +483,26 @@ class DataBrowser(QWidget):
         row = index.row()
         # Could open image viewer or details dialog
         self.row_selected.emit(row)
+
+    def _on_source_path_clicked(self, event) -> None:
+        """Handle source path label click - open directory in Finder/Explorer"""
+        from utils.config_manager import get_config
+        import subprocess
+        import sys
+
+        config = get_config()
+        source_dir = config.get_source_dir()
+
+        if source_dir and Path(source_dir).exists():
+            try:
+                if sys.platform == 'darwin':  # macOS
+                    subprocess.run(['open', source_dir])
+                elif sys.platform == 'win32':  # Windows
+                    subprocess.run(['explorer', source_dir])
+                else:  # Linux
+                    subprocess.run(['xdg-open', source_dir])
+            except Exception as e:
+                print(f"Error opening directory: {e}")
 
     def _on_archive_file(self, row: int) -> None:
         """Handle archive button click for a row"""

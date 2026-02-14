@@ -7,6 +7,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from PyQt6.QtWidgets import QMessageBox
 from typing import Optional, Dict, Any
 from pathlib import Path
+import numpy as np
 
 from models.data_model import DataModel
 from utils.plot_generator import get_plot_generator
@@ -153,7 +154,7 @@ class AppController(QObject):
 
     def _load_image_for_row(self, file_path: str, camera_model: str) -> None:
         """
-        Load image for selected row and open in popup window.
+        Load image for selected row and open in popup window with raw data.
 
         Args:
             file_path: Path to image file
@@ -161,31 +162,75 @@ class AppController(QObject):
         """
         try:
             from PyQt6.QtGui import QPixmap, QImage
-            from utils.image_loader import normalize_for_display
+            import rawpy
 
-            # Load the image using image loader
-            image_array = self.image_loader.load_image(
-                file_path,
-                fast_preview=False,
-                camera_model=camera_model
+            # Load raw data directly without color processing
+            with rawpy.imread(str(file_path)) as raw:
+                # Get raw pixel data (greyscale)
+                raw_data = raw.raw_image.copy()
+
+                # Apply camera-specific crop if available
+                from sensor_camera import Sensor
+                crop = Sensor.CAMERA_CROPS.get(camera_model)
+                if crop is not None:
+                    raw_data = raw_data[crop]
+
+                # Calculate statistics
+                mean_val = float(np.mean(raw_data))
+                std_val = float(np.std(raw_data))
+                ydim, xdim = raw_data.shape
+                bit_depth = raw_data.dtype.itemsize * 8
+                min_val = int(np.min(raw_data))
+                max_val = int(np.max(raw_data))
+
+                # Normalize to 8-bit for display
+                if raw_data.dtype == np.uint16:
+                    display_array = (raw_data.astype(np.float32) / 65535.0 * 255.0).astype(np.uint8)
+                elif raw_data.dtype == np.uint8:
+                    display_array = raw_data
+                else:
+                    # For other types, normalize to full range
+                    min_val = np.min(raw_data)
+                    max_val = np.max(raw_data)
+                    if max_val > min_val:
+                        display_array = ((raw_data.astype(np.float32) - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+                    else:
+                        display_array = np.zeros_like(raw_data, dtype=np.uint8)
+
+                # Convert to QImage (greyscale)
+                bytes_per_line = xdim
+                qimage = QImage(display_array.data, xdim, ydim, bytes_per_line, QImage.Format.Format_Grayscale8)
+                pixmap = QPixmap.fromImage(qimage)
+
+                # Prepare statistics dictionary
+                stats = {
+                    'bit_depth': bit_depth,
+                    'width': xdim,
+                    'height': ydim,
+                    'mean': mean_val,
+                    'std': std_val,
+                    'min': min_val,
+                    'max': max_val
+                }
+
+            # Calculate file hash and look up camera ID for histogram settings
+            file_hash = None
+            camera_id = None
+            try:
+                from utils.db_manager import get_db_manager
+                db = get_db_manager()
+                file_hash = db.calculate_file_hash(Path(file_path))
+                camera_id = db.get_camera_id_by_file_hash(file_hash)
+                print(f"Loaded image with camera_id={camera_id}")
+            except Exception as e:
+                print(f"Could not look up camera ID: {e}")
+
+            # Open image window with loaded image and statistics
+            self.image_window.load_image(
+                pixmap, display_array, file_path,
+                stats=stats, raw_data=raw_data,
+                file_hash=file_hash, camera_id=camera_id
             )
-
-            # Normalize for display
-            display_array = normalize_for_display(image_array)
-
-            # Convert to QPixmap
-            height, width = display_array.shape[:2]
-            if len(display_array.shape) == 3:
-                bytes_per_line = 3 * width
-                qimage = QImage(display_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            else:
-                bytes_per_line = width
-                qimage = QImage(display_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
-
-            pixmap = QPixmap.fromImage(qimage)
-
-            # Open image window with loaded image
-            self.image_window.load_image(pixmap, display_array, file_path)
             self.image_window.show()
             self.image_window.raise_()
             self.image_window.activateWindow()

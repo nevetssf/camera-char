@@ -116,6 +116,19 @@ class DatabaseManager:
             FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
         );
 
+        -- Camera attributes (histogram settings and bit depth overrides)
+        CREATE TABLE IF NOT EXISTS camera_attributes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            camera_id INTEGER UNIQUE NOT NULL,
+            x_min INTEGER,
+            x_max INTEGER,
+            y_min INTEGER,
+            y_max INTEGER,
+            bits_per_pixel_actual INTEGER,
+
+            FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+        );
+
         -- Indexes
         CREATE INDEX IF NOT EXISTS idx_images_file_hash ON images(file_hash);
         CREATE INDEX IF NOT EXISTS idx_images_file_type ON images(file_type);
@@ -451,6 +464,88 @@ class DatabaseManager:
             stats['analyzed_images'] = cursor.fetchone()['count']
 
             return stats
+
+    def get_camera_attributes(self, camera_id: int) -> Optional[Dict]:
+        """
+        Get camera attributes (histogram settings and bit depth).
+
+        Args:
+            camera_id: Camera ID
+
+        Returns:
+            Dictionary with x_min, x_max, y_min, y_max, bits_per_pixel_actual
+            or None if no attributes saved
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """SELECT x_min, x_max, y_min, y_max, bits_per_pixel_actual
+                   FROM camera_attributes WHERE camera_id = ?""",
+                (camera_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def update_camera_attributes(self, camera_id: int,
+                                 x_min: Optional[int] = None,
+                                 x_max: Optional[int] = None,
+                                 y_min: Optional[int] = None,
+                                 y_max: Optional[int] = None,
+                                 bits_per_pixel_actual: Optional[int] = None) -> None:
+        """
+        Update camera attributes. Creates record if doesn't exist.
+
+        Args:
+            camera_id: Camera ID
+            x_min: Histogram X minimum
+            x_max: Histogram X maximum
+            y_min: Histogram Y minimum
+            y_max: Histogram Y maximum
+            bits_per_pixel_actual: Actual bits per pixel (override)
+        """
+        with self.get_connection() as conn:
+            # Check if record exists
+            cursor = conn.execute(
+                "SELECT id FROM camera_attributes WHERE camera_id = ?",
+                (camera_id,)
+            )
+            exists = cursor.fetchone() is not None
+
+            if exists:
+                # Update existing record
+                conn.execute(
+                    """UPDATE camera_attributes
+                       SET x_min = ?, x_max = ?, y_min = ?, y_max = ?, bits_per_pixel_actual = ?
+                       WHERE camera_id = ?""",
+                    (x_min, x_max, y_min, y_max, bits_per_pixel_actual, camera_id)
+                )
+                self.logger.info(f"Updated attributes for camera {camera_id}")
+            else:
+                # Insert new record
+                conn.execute(
+                    """INSERT INTO camera_attributes
+                       (camera_id, x_min, x_max, y_min, y_max, bits_per_pixel_actual)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (camera_id, x_min, x_max, y_min, y_max, bits_per_pixel_actual)
+                )
+                self.logger.info(f"Created attributes for camera {camera_id}")
+
+    def get_camera_id_by_file_hash(self, file_hash: str) -> Optional[int]:
+        """
+        Get camera ID from image file hash.
+
+        Args:
+            file_hash: SHA256 hash of image file
+
+        Returns:
+            Camera ID or None if not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT camera_id FROM images WHERE file_hash = ?",
+                (file_hash,)
+            )
+            row = cursor.fetchone()
+            return row['camera_id'] if row else None
 
 
 def get_db_manager() -> DatabaseManager:

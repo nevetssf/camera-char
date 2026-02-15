@@ -36,7 +36,7 @@ DataBrowser._on_filter_changed()
 - **main.py** — Entry point. macOS integration, dependency checks, config/db/logger init, creates MainWindow + AppController
 - **sensor_camera.py** — Core analysis engine. `Sensor` class (single camera scan, noise stats, EV calculation) and `Analysis` class (multi-camera aggregate). EV = log2((white_level - black_level) / std_dev)
 - **controllers/app_controller.py** — Signal routing, background image loading, state coordination
-- **models/data_model.py** — DataFrame filtering, exposes data to views. `exposure_setting` is a calculated display column (not in DB)
+- **models/data_model.py** — DataFrame filtering, exposes data to views
 - **utils/db_manager.py** — SQLite database (images, cameras, analysis_results, exif_data, camera_attributes tables)
 - **utils/analysis_runner.py** — Orchestrates scanning and analyzing images, with progress callbacks and cancellation
 - **utils/config_manager.py** — Singleton. Working dir (`~/.camera-char/`), source dir (raw images path)
@@ -52,8 +52,7 @@ DataBrowser._on_filter_changed()
 
 ## Important Patterns
 
-- **Exposure time formatting**: Always use `round(1/exposure_time)` not `int()` — e.g., 0.016667s → "1/60s" not "1/59s". Format: `1/{n}s` for < 1s, `{n}s` for >= 1s
-- **exposure_setting column**: Calculated from exposure_time at load time in data_model.py, NOT stored in database. Placed before exposure_time in column order
+- **Exposure time formatting**: Always use `round(1/exposure_time)` not `int()` — e.g., 0.016667s → "1/60s" not "1/59s". Format: `1/{n}s` for < 1s, `{n}s` for >= 1s. There is no `exposure_setting` column — derive formatted display from `exposure_time` using `format_exposure_time()` in data_browser.py
 - **QWebEngineView.setHtml()** is async — calling it twice rapidly causes blank renders. Always ensure single call path
 - **Singletons**: `get_config()`, `get_db_manager()`, `get_logger()`, `get_plot_generator()` all return global instances
 - **Camera crops**: Defined in `sensor_camera.CAMERA_CROPS` dict, applied during image loading

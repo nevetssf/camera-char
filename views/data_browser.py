@@ -83,11 +83,6 @@ class PandasTableModel(QAbstractTableModel):
                 from pathlib import Path
                 return Path(str(value)).name
 
-            # For 'exposure_setting' column, format from exposure_time
-            if column_name == 'exposure_setting':
-                # The value is actually exposure_time, format it as shutter speed
-                return format_exposure_time(value)
-
             # Format floats nicely
             if isinstance(value, float):
                 return f"{value:.6f}"
@@ -218,7 +213,6 @@ class DataBrowser(QWidget):
         self.filter_options = [
             ('camera', 'Camera'),
             ('iso', 'ISO'),
-            ('exposure_setting', 'Exposure Setting'),
             ('exposure_time', 'Exposure Time'),
         ]
 
@@ -245,8 +239,7 @@ class DataBrowser(QWidget):
 
     def _create_filter_column(self, index: int) -> tuple:
         """Create a single filter column"""
-        # Default filters: camera, iso, exposure_setting
-        default_filters = ['camera', 'iso', 'exposure_setting']
+        default_filters = ['camera', 'iso', 'exposure_time']
         default_filter = default_filters[index] if index < len(default_filters) else 'camera'
 
         col_widget = QWidget()
@@ -364,12 +357,7 @@ class DataBrowser(QWidget):
             if filters:
                 data_source = self.data_model.full_data.copy()
                 for field, values in filters.items():
-                    # Special handling: exposure_setting is calculated from exposure_time
-                    if field == 'exposure_setting':
-                        # The values are exposure_time values, filter on exposure_time column
-                        data_source = data_source[data_source['exposure_time'].isin(values)]
-                    else:
-                        data_source = data_source[data_source[field].isin(values)]
+                    data_source = data_source[data_source[field].isin(values)]
             else:
                 data_source = self.data_model.full_data
 
@@ -382,15 +370,7 @@ class DataBrowser(QWidget):
             items = [str(v) for v in values]
         elif filter_type == 'exposure_time':
             values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)]) if 'exposure_time' in data_source.columns else []
-            items = [f"{v:.6f}s" for v in values]
-        elif filter_type == 'exposure_setting':
-            # Get unique exposure_time values and format them as shutter speeds
-            if 'exposure_time' in data_source.columns:
-                values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)])
-                items = [format_exposure_time(v) for v in values]
-            else:
-                values = []
-                items = []
+            items = [format_exposure_time(v) for v in values]
         elif filter_type == 'bits_per_sample':
             values = sorted([x for x in data_source['bits_per_sample'].unique().tolist() if pd.notna(x)]) if 'bits_per_sample' in data_source.columns else []
             items = [f"{v} bit" for v in values]

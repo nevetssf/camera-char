@@ -115,7 +115,6 @@ class PlotViewer(QWidget):
         self.group_combo = QComboBox()
         self.group_combo.addItem("Camera", "camera")
         self.group_combo.addItem("ISO", "iso")
-        self.group_combo.addItem("Exposure Setting", "exposure_setting")
         self.group_combo.addItem("Exposure Time", "exposure_time")
         self.group_combo.setCurrentIndex(0)  # Default to Camera
         self.group_combo.currentIndexChanged.connect(self._on_control_changed)
@@ -273,9 +272,7 @@ class PlotViewer(QWidget):
 
     def _on_log_scale_changed(self) -> None:
         """Handle log scale checkbox state change - regenerate plot"""
-        # Note: Plot will be regenerated when filters change in the data browser
-        # This is just a placeholder for future manual regeneration if needed
-        pass
+        self._on_control_changed()
 
     def _on_control_changed(self) -> None:
         """Handle control changes - regenerate plot with new settings"""
@@ -615,8 +612,7 @@ class PlotViewer(QWidget):
             group_data = group_data.sort_values(xaxis_param)
 
             # Format group value for display (legend and hover text)
-            if group_param in ['exposure_time', 'exposure_setting']:
-                # Both store the actual time in seconds (exposure_setting is calculated from exposure_time)
+            if group_param == 'exposure_time':
                 group_label = self._format_exposure_value(group_value, is_denominator=False)
             else:
                 group_label = str(group_value)

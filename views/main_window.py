@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
 
         self.action_limit_100 = QAction("Limit to 20 Images (Testing)", self)
         self.action_limit_100.setCheckable(True)
-        self.action_limit_100.setChecked(True)  # Checked by default for testing
+        self.action_limit_100.setChecked(False)
         self.action_limit_100.setStatusTip("Limit scans and analysis to 20 images for testing")
         # No connection needed - just checked when running operations
 

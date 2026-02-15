@@ -145,7 +145,7 @@ class PixelCropWindow(QDialog):
         self.stats_label = QLabel("")
         stats_font = QFont("Monospace", 10)
         self.stats_label.setFont(stats_font)
-        self.stats_label.setStyleSheet("background-color: #f0f0f0; padding: 5px; border: 1px solid #ccc;")
+        self.stats_label.setStyleSheet("padding: 5px; border: 1px solid palette(mid);")
         layout.addWidget(self.stats_label)
 
     def update_crop(self, raw_data: np.ndarray, center_y: int, center_x: int,
@@ -653,7 +653,7 @@ class ImageWindow(QDialog):
         self.stats_label = QLabel("No image statistics")
         stats_font = QFont("Monospace", 11)
         self.stats_label.setFont(stats_font)
-        self.stats_label.setStyleSheet("background-color: #f0f0f0; padding: 8px; border: 1px solid #ccc;")
+        self.stats_label.setStyleSheet("padding: 8px; border: 1px solid palette(mid);")
         stats_layout.addWidget(self.stats_label)
         main_layout.addLayout(stats_layout)
 

@@ -261,13 +261,13 @@ class MainWindow(QMainWindow):
         # Center panel: Tabbed interface (50%)
         self.tab_widget = QTabWidget()
 
-        # Tab 1: Metadata viewer (with pop-out image button)
-        self.image_viewer = ImageViewer()
-        self.tab_widget.addTab(self.image_viewer, "Metadata")
-
-        # Tab 2: Plot viewer (unified for EV vs ISO and EV vs Time)
+        # Tab 1: Plot viewer (unified for EV vs ISO and EV vs Time)
         self.plot_viewer = PlotViewer(plot_type="ev_vs_iso")
         self.tab_widget.addTab(self.plot_viewer, "Plot")
+
+        # Tab 2: Metadata viewer (with pop-out image button)
+        self.image_viewer = ImageViewer()
+        self.tab_widget.addTab(self.image_viewer, "Metadata")
 
         main_splitter.addWidget(self.tab_widget)
 
@@ -294,6 +294,9 @@ class MainWindow(QMainWindow):
 
         # When data browser emits status message, show in status bar
         self.data_browser.status_message.connect(self.status_bar.showMessage)
+
+        # When data browser filters change, update plot
+        self.data_browser.data_filtered.connect(self._on_data_filtered)
 
         # When plot viewer camera selection changes, update data browser
         # (This could be implemented for bidirectional filtering)
@@ -342,7 +345,7 @@ class MainWindow(QMainWindow):
         # Get current tab
         current_index = self.tab_widget.currentIndex()
 
-        if current_index == 1:  # Plot tab
+        if current_index == 0:  # Plot tab
             plot_viewer = self.plot_viewer
         else:
             QMessageBox.warning(
@@ -1739,6 +1742,37 @@ Database Location:
         except Exception as e:
             logger.error(f"Error in row selection: {e}", exc_info=True)
             self.status_bar.showMessage(f"Error: {str(e)}")
+
+    def _on_data_filtered(self) -> None:
+        """Handle data browser filter changes - update plot with filtered data"""
+        from utils.app_logger import get_logger
+        import traceback
+        logger = get_logger()
+
+        try:
+            # Log the call stack to see where this is being called from
+            stack = ''.join(traceback.format_stack()[-4:-1])
+            logger.info(f"Filter changed - updating plot\nCall stack:\n{stack}")
+
+            # Get filtered data from data browser
+            filtered_data = self.data_browser.get_filtered_data()
+
+            logger.info(f"Filtered data: {len(filtered_data)} rows")
+
+            # Update plot viewer with filtered data
+            if filtered_data is not None and not filtered_data.empty:
+                logger.info("Calling plot_viewer.generate_plot_from_data()")
+                # Switch to Plot tab
+                self.tab_widget.setCurrentIndex(0)  # Plot is tab 0
+                self.plot_viewer.generate_plot_from_data(filtered_data)
+                logger.info("Plot generation complete")
+            else:
+                # Clear plot if no data
+                logger.info("No data to plot")
+                self.plot_viewer.status_label.setText("No data matches current filters")
+        except Exception as e:
+            logger.error(f"Error updating plot after filter change: {e}", exc_info=True)
+            self.status_bar.showMessage(f"Error updating plot: {str(e)}")
 
     def show_message(self, message: str, timeout: int = 5000) -> None:
         """

@@ -85,12 +85,8 @@ class PandasTableModel(QAbstractTableModel):
 
             # For 'exposure_setting' column, format from exposure_time
             if column_name == 'exposure_setting':
-                # Get exposure_time from the same row
-                if 'exposure_time' in self._data.columns:
-                    exposure_time = self._data.iloc[index.row()]['exposure_time']
-                    return format_exposure_time(exposure_time)
-                # Fallback to displaying the setting value if no exposure_time
-                return str(value) if pd.notna(value) else "N/A"
+                # The value is actually exposure_time, format it as shutter speed
+                return format_exposure_time(value)
 
             # Format floats nicely
             if isinstance(value, float):
@@ -249,21 +245,13 @@ class DataBrowser(QWidget):
 
     def _create_filter_column(self, index: int) -> tuple:
         """Create a single filter column"""
-        # Default filters: camera, iso, exposure_time
-        default_filters = ['camera', 'iso', 'exposure_time']
+        # Default filters: camera, iso, exposure_setting
+        default_filters = ['camera', 'iso', 'exposure_setting']
         default_filter = default_filters[index] if index < len(default_filters) else 'camera'
 
         col_widget = QWidget()
         col_layout = QVBoxLayout()
         col_widget.setLayout(col_layout)
-
-        # Add column label
-        label = QLabel(self.column_labels[index])
-        label_font = QFont()
-        label_font.setBold(True)
-        label.setFont(label_font)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        col_layout.addWidget(label)
 
         # Dropdown to select filter type
         type_combo = QComboBox()
@@ -350,6 +338,7 @@ class DataBrowser(QWidget):
         filter_type = col_data['current_type']
         list_widget = col_data['list_widget']
 
+        # Note: Signal blocking is handled by the caller (_on_filter_changed)
         list_widget.clear()
 
         # Get data filtered by previous columns (cascading filter)
@@ -375,8 +364,9 @@ class DataBrowser(QWidget):
             if filters:
                 data_source = self.data_model.full_data.copy()
                 for field, values in filters.items():
-                    # Special handling: exposure_setting filter uses exposure_time values
+                    # Special handling: exposure_setting is calculated from exposure_time
                     if field == 'exposure_setting':
+                        # The values are exposure_time values, filter on exposure_time column
                         data_source = data_source[data_source['exposure_time'].isin(values)]
                     else:
                         data_source = data_source[data_source[field].isin(values)]
@@ -394,7 +384,7 @@ class DataBrowser(QWidget):
             values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)]) if 'exposure_time' in data_source.columns else []
             items = [f"{v:.6f}s" for v in values]
         elif filter_type == 'exposure_setting':
-            # Get unique exposure_time values and format them
+            # Get unique exposure_time values and format them as shutter speeds
             if 'exposure_time' in data_source.columns:
                 values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)])
                 items = [format_exposure_time(v) for v in values]
@@ -472,14 +462,19 @@ class DataBrowser(QWidget):
     def _on_filter_changed(self, column_index: Optional[int] = None) -> None:
         """Handle filter selection change"""
         # Repopulate subsequent filter columns (cascading effect)
+        # Block signals to prevent recursive triggering when restoring selections
         if column_index is not None:
             for i in range(column_index + 1, len(self.filter_columns)):
-                # Save current selection
                 col_data = self.filter_columns[i]
                 list_widget = col_data['list_widget']
+
+                # Save current selection
                 selected_values = [
                     item.data(Qt.ItemDataRole.UserRole) for item in list_widget.selectedItems()
                 ]
+
+                # Block signals while repopulating to avoid recursive filter updates
+                list_widget.blockSignals(True)
 
                 # Repopulate with cascaded values
                 self._populate_filter_column(i)
@@ -489,6 +484,8 @@ class DataBrowser(QWidget):
                     item = list_widget.item(j)
                     if item.data(Qt.ItemDataRole.UserRole) in selected_values:
                         item.setSelected(True)
+
+                list_widget.blockSignals(False)
 
         # Collect filters from all columns
         filters = {}
@@ -512,6 +509,9 @@ class DataBrowser(QWidget):
         self._update_table()
 
         # Emit signal
+        from utils.app_logger import get_logger
+        logger = get_logger()
+        logger.info(f"Emitting data_filtered signal (filters: {list(filters.keys())})")
         self.data_filtered.emit()
 
     def _on_search(self, text: str) -> None:

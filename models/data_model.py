@@ -49,6 +49,23 @@ class DataModel:
             self.full_data['time'] = self.full_data['exposure_time']
             self.filtered_data['time'] = self.filtered_data['exposure_time']
 
+        # Add calculated 'exposure_setting' column for human-readable exposure times
+        if 'exposure_time' in self.full_data.columns:
+            self.full_data['exposure_setting'] = self.full_data['exposure_time']
+            self.filtered_data['exposure_setting'] = self.filtered_data['exposure_time']
+
+            # Reorder columns to put exposure_setting before exposure_time
+            cols = self.full_data.columns.tolist()
+            if 'exposure_setting' in cols and 'exposure_time' in cols:
+                # Remove exposure_setting from its current position
+                cols.remove('exposure_setting')
+                # Insert it right before exposure_time
+                exp_time_idx = cols.index('exposure_time')
+                cols.insert(exp_time_idx, 'exposure_setting')
+                # Reorder both dataframes
+                self.full_data = self.full_data[cols]
+                self.filtered_data = self.filtered_data[cols]
+
     def get_data(self) -> pd.DataFrame:
         """Get the currently filtered data"""
         return self.filtered_data.copy() if self.filtered_data is not None else pd.DataFrame()
@@ -225,8 +242,9 @@ class DataModel:
 
         for field, values in filters.items():
             if values:  # Only apply if values are selected
-                # Special handling: exposure_setting filter uses exposure_time values
+                # Special handling: exposure_setting is calculated from exposure_time
                 if field == 'exposure_setting':
+                    # The values are exposure_time values, filter on exposure_time column
                     data = data[data['exposure_time'].isin(values)]
                 else:
                     data = data[data[field].isin(values)]

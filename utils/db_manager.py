@@ -103,12 +103,6 @@ class DatabaseManager:
             exif_json TEXT NOT NULL,
             iso INTEGER,
             exposure_time REAL,
-            exposure_setting INTEGER GENERATED ALWAYS AS (
-                CASE
-                    WHEN exposure_time > 0 AND exposure_time < 1 THEN CAST(ROUND(1.0 / exposure_time) AS INTEGER)
-                    ELSE NULL
-                END
-            ) STORED,
             black_level TEXT,
             white_level TEXT,
             bits_per_sample INTEGER,
@@ -407,7 +401,6 @@ class DatabaseManager:
                     END as camera,
                     e.iso,
                     e.exposure_time,
-                    e.exposure_setting,
                     a.ev,
                     a.noise_std,
                     a.noise_mean,

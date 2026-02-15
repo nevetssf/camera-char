@@ -1,8 +1,8 @@
 """
 Projection Window - Shows X and Y axis projection plots of raw image data.
-A projection is the sum of pixel values along each axis (dimension).
-X projection: sum along Y axis (vertical sum) -> horizontal profile
-Y projection: sum along X axis (horizontal sum) -> vertical profile
+A projection is the mean of pixel values along each axis (dimension).
+X projection: mean along Y axis (vertical mean) -> horizontal profile
+Y projection: mean along X axis (horizontal mean) -> vertical profile
 """
 
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QSpinBox
@@ -56,6 +56,9 @@ class HistogramWindow(QDialog):
         self.x_min_slider.setMinimum(0)
         self.x_min_slider.setMaximum(1000)
         self.x_min_slider.setValue(0)
+        self.x_min_slider.setSingleStep(1)  # Fine adjustment with arrow keys
+        self.x_min_slider.setPageStep(10)  # Larger jump with Page Up/Down
+        self.x_min_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow click to focus
         self.x_min_slider.valueChanged.connect(self._on_x_range_changed)
         x_slider_layout.addWidget(QLabel("Min:"))
         x_slider_layout.addWidget(self.x_min_slider)
@@ -64,6 +67,9 @@ class HistogramWindow(QDialog):
         self.x_max_slider.setMinimum(0)
         self.x_max_slider.setMaximum(1000)
         self.x_max_slider.setValue(1000)
+        self.x_max_slider.setSingleStep(1)  # Fine adjustment with arrow keys
+        self.x_max_slider.setPageStep(10)  # Larger jump with Page Up/Down
+        self.x_max_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow click to focus
         self.x_max_slider.valueChanged.connect(self._on_x_range_changed)
         x_slider_layout.addWidget(QLabel("Max:"))
         x_slider_layout.addWidget(self.x_max_slider)
@@ -80,6 +86,9 @@ class HistogramWindow(QDialog):
         self.y_min_slider.setMinimum(0)
         self.y_min_slider.setMaximum(1000)
         self.y_min_slider.setValue(0)
+        self.y_min_slider.setSingleStep(1)  # Fine adjustment with arrow keys
+        self.y_min_slider.setPageStep(10)  # Larger jump with Page Up/Down
+        self.y_min_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow click to focus
         self.y_min_slider.valueChanged.connect(self._on_y_range_changed)
         y_slider_layout.addWidget(QLabel("Min:"))
         y_slider_layout.addWidget(self.y_min_slider)
@@ -88,6 +97,9 @@ class HistogramWindow(QDialog):
         self.y_max_slider.setMinimum(0)
         self.y_max_slider.setMaximum(1000)
         self.y_max_slider.setValue(1000)
+        self.y_max_slider.setSingleStep(1)  # Fine adjustment with arrow keys
+        self.y_max_slider.setPageStep(10)  # Larger jump with Page Up/Down
+        self.y_max_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow click to focus
         self.y_max_slider.valueChanged.connect(self._on_y_range_changed)
         y_slider_layout.addWidget(QLabel("Max:"))
         y_slider_layout.addWidget(self.y_max_slider)
@@ -113,7 +125,7 @@ class HistogramWindow(QDialog):
         Calculates axis projections by summing pixel values along each dimension.
 
         Args:
-            raw_data: Raw image data (2D numpy array)
+            raw_data: Raw image data (2D numpy array) - should be uncropped original data
             filename: Optional filename for title
             file_hash: File hash for database lookup
             camera_id: Camera ID for loading/saving attributes
@@ -125,31 +137,41 @@ class HistogramWindow(QDialog):
         self.current_file_hash = file_hash
         self.current_camera_id = camera_id
 
-        # Calculate projections
-        # Sum along axis 0 (rows) -> gives values for each column (X profile)
-        self.x_projection_full = np.sum(raw_data.astype(np.float64), axis=0)
+        # Calculate projections from the data (should be uncropped original)
+        # Mean along axis 0 (rows) -> gives values for each column (X profile)
+        self.x_projection_full = np.mean(raw_data.astype(np.float64), axis=0)
 
-        # Sum along axis 1 (columns) -> gives values for each row (Y profile)
-        self.y_projection_full = np.sum(raw_data.astype(np.float64), axis=1)
+        # Mean along axis 1 (columns) -> gives values for each row (Y profile)
+        self.y_projection_full = np.mean(raw_data.astype(np.float64), axis=1)
 
         self.filename = filename
 
-        # Set up sliders for the new data
+        # Slider ranges match the data dimensions (original uncropped dimensions)
+        slider_width = len(self.x_projection_full)
+        slider_height = len(self.y_projection_full)
+
+        # Block signals while setting up sliders to prevent premature _update_plots calls
+        self.x_min_slider.blockSignals(True)
+        self.x_max_slider.blockSignals(True)
+        self.y_min_slider.blockSignals(True)
+        self.y_max_slider.blockSignals(True)
+
+        # Set up sliders for the new data using original dimensions
         # Min sliders: 0 to 100
         self.x_min_slider.setMinimum(0)
-        self.x_min_slider.setMaximum(min(100, len(self.x_projection_full) - 1))
+        self.x_min_slider.setMaximum(min(100, slider_width - 1))
 
         # Max sliders: (length - 100) to length
-        self.x_max_slider.setMinimum(max(0, len(self.x_projection_full) - 100))
-        self.x_max_slider.setMaximum(len(self.x_projection_full) - 1)
+        self.x_max_slider.setMinimum(max(0, slider_width - 100))
+        self.x_max_slider.setMaximum(slider_width - 1)
 
         # Min sliders: 0 to 100
         self.y_min_slider.setMinimum(0)
-        self.y_min_slider.setMaximum(min(100, len(self.y_projection_full) - 1))
+        self.y_min_slider.setMaximum(min(100, slider_height - 1))
 
         # Max sliders: (length - 100) to length
-        self.y_max_slider.setMinimum(max(0, len(self.y_projection_full) - 100))
-        self.y_max_slider.setMaximum(len(self.y_projection_full) - 1)
+        self.y_max_slider.setMinimum(max(0, slider_height - 100))
+        self.y_max_slider.setMaximum(slider_height - 1)
 
         # Load saved camera attributes if available
         saved_attrs = None
@@ -162,47 +184,41 @@ class HistogramWindow(QDialog):
             except Exception as e:
                 print(f"Could not load camera attributes: {e}")
 
-        # Block signals while setting up sliders to prevent premature _update_plots calls
-        self.x_min_slider.blockSignals(True)
-        self.x_max_slider.blockSignals(True)
-        self.y_min_slider.blockSignals(True)
-        self.y_max_slider.blockSignals(True)
-
         # Apply saved attributes or defaults
-        # Validate that saved values are within current image dimensions
+        # Validate that saved values are within original image dimensions
         if saved_attrs:
             x_min = saved_attrs.get('x_min')
             x_max = saved_attrs.get('x_max')
             y_min = saved_attrs.get('y_min')
             y_max = saved_attrs.get('y_max')
 
-            # Validate X bounds
-            if x_min is not None and 0 <= x_min < len(self.x_projection_full):
+            # Validate X bounds against original dimensions
+            if x_min is not None and 0 <= x_min < slider_width:
                 self.x_min_slider.setValue(x_min)
             else:
                 self.x_min_slider.setValue(0)
 
-            if x_max is not None and 0 <= x_max < len(self.x_projection_full):
+            if x_max is not None and 0 <= x_max < slider_width:
                 self.x_max_slider.setValue(x_max)
             else:
-                self.x_max_slider.setValue(len(self.x_projection_full) - 1)
+                self.x_max_slider.setValue(slider_width - 1)
 
-            # Validate Y bounds
-            if y_min is not None and 0 <= y_min < len(self.y_projection_full):
+            # Validate Y bounds against original dimensions
+            if y_min is not None and 0 <= y_min < slider_height:
                 self.y_min_slider.setValue(y_min)
             else:
                 self.y_min_slider.setValue(0)
 
-            if y_max is not None and 0 <= y_max < len(self.y_projection_full):
+            if y_max is not None and 0 <= y_max < slider_height:
                 self.y_max_slider.setValue(y_max)
             else:
-                self.y_max_slider.setValue(len(self.y_projection_full) - 1)
+                self.y_max_slider.setValue(slider_height - 1)
         else:
-            # Default values
+            # Default values - use original dimensions
             self.x_min_slider.setValue(0)
-            self.x_max_slider.setValue(len(self.x_projection_full) - 1)
+            self.x_max_slider.setValue(slider_width - 1)
             self.y_min_slider.setValue(0)
-            self.y_max_slider.setValue(len(self.y_projection_full) - 1)
+            self.y_max_slider.setValue(slider_height - 1)
 
         # Unblock signals now that all sliders are configured
         self.x_min_slider.blockSignals(False)
@@ -247,8 +263,8 @@ class HistogramWindow(QDialog):
         x_coords = np.arange(x_min, x_max+1)
         self.ax_x.plot(x_coords, x_projection, 'b-', linewidth=1)
         self.ax_x.set_xlabel('X Position (pixels)')
-        self.ax_x.set_ylabel('Sum of Pixel Values')
-        self.ax_x.set_title(f'X Projection (Vertical Sum)\n{self.filename}')
+        self.ax_x.set_ylabel('Mean Pixel Value')
+        self.ax_x.set_title(f'X Projection (Vertical Mean)\n{self.filename}')
         self.ax_x.grid(True, alpha=0.3)
 
         # Plot Y projection (vertical profile) with limited range
@@ -256,8 +272,8 @@ class HistogramWindow(QDialog):
         y_coords = np.arange(y_min, y_max+1)
         self.ax_y.plot(y_coords, y_projection, 'r-', linewidth=1)
         self.ax_y.set_xlabel('Y Position (pixels)')
-        self.ax_y.set_ylabel('Sum of Pixel Values')
-        self.ax_y.set_title('Y Projection (Horizontal Sum)')
+        self.ax_y.set_ylabel('Mean Pixel Value')
+        self.ax_y.set_title('Y Projection (Horizontal Mean)')
         self.ax_y.grid(True, alpha=0.3)
 
         # Adjust layout and redraw

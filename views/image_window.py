@@ -7,9 +7,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGraphicsView,
     QGraphicsScene, QGraphicsPixmapItem, QLabel, QPushButton, QFileDialog,
     QCheckBox, QSpinBox, QTextEdit, QGroupBox, QScrollArea, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QStatusBar,
+    QMenuBar, QMenu
 )
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPointF
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QMouseEvent, QFont
 import numpy as np
 from pathlib import Path
@@ -18,6 +19,9 @@ from typing import Optional, Callable
 
 class ZoomableGraphicsView(QGraphicsView):
     """Graphics view with zoom and pan capabilities"""
+
+    # Signal emitted when mouse moves over image: (x, y, pixel_value)
+    mouse_moved = pyqtSignal(int, int, int)
 
     def __init__(self):
         """Initialize zoomable graphics view"""
@@ -36,6 +40,7 @@ class ZoomableGraphicsView(QGraphicsView):
 
         self.setMouseTracking(True)
         self.current_image = None
+        self.raw_image_data = None  # Store raw pixel data for value lookup
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Handle mouse wheel for zooming"""
@@ -73,9 +78,34 @@ class ZoomableGraphicsView(QGraphicsView):
             self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
             self.current_zoom /= self.zoom_factor
 
-    def set_image(self, image: np.ndarray) -> None:
-        """Set image to display"""
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Handle mouse move to show pixel coordinates and value"""
+        super().mouseMoveEvent(event)
+
+        if self.current_image is not None and self.raw_image_data is not None:
+            # Map view coordinates to scene coordinates
+            scene_pos = self.mapToScene(event.pos())
+
+            # Get image coordinates
+            x = int(scene_pos.x())
+            y = int(scene_pos.y())
+
+            # Check if coordinates are within image bounds
+            if 0 <= y < self.raw_image_data.shape[0] and 0 <= x < self.raw_image_data.shape[1]:
+                pixel_value = int(self.raw_image_data[y, x])
+                self.mouse_moved.emit(x, y, pixel_value)
+
+    def set_image(self, image: np.ndarray, raw_data: np.ndarray = None) -> None:
+        """
+        Set image to display.
+
+        Args:
+            image: Display image array (8-bit)
+            raw_data: Raw image data for pixel value lookup
+        """
         self.current_image = image
+        if raw_data is not None:
+            self.raw_image_data = raw_data
 
 
 class PixelCropWindow(QDialog):
@@ -99,7 +129,7 @@ class PixelCropWindow(QDialog):
         self.setLayout(layout)
 
         # Info label
-        self.info_label = QLabel("Click on a bad pixel to view details")
+        self.info_label = QLabel("Click on a leaky pixel to view details")
         self.info_label.setStyleSheet("font-weight: bold; padding: 5px;")
         layout.addWidget(self.info_label)
 
@@ -119,7 +149,7 @@ class PixelCropWindow(QDialog):
         layout.addWidget(self.stats_label)
 
     def update_crop(self, raw_data: np.ndarray, center_y: int, center_x: int,
-                    pixel_value: int, auto_scale: bool, log_view: bool):
+                    pixel_value: int, scale_mode: str):
         """
         Update the window with a 32x32 crop around the specified pixel.
 
@@ -128,8 +158,7 @@ class PixelCropWindow(QDialog):
             center_y: Y coordinate of center pixel
             center_x: X coordinate of center pixel
             pixel_value: Value of the center pixel
-            auto_scale: Apply auto-scaling
-            log_view: Apply log view
+            scale_mode: Scale mode ("Linear", "Log", "Normalization", or "Equalization")
         """
         # Store current state for refresh
         self.current_raw_data = raw_data
@@ -149,25 +178,62 @@ class PixelCropWindow(QDialog):
 
         crop = raw_data[y_start:y_end, x_start:x_end].copy()
 
-        # Apply scaling
+        # Apply scaling based on mode
         working_data = crop.astype(np.float32)
 
-        if log_view:
-            working_data = np.log10(working_data + 1.0)
+        # Calculate stats for Linear mode
+        crop_min = np.min(crop)
+        crop_max = np.max(crop)
 
-        if auto_scale:
+        if scale_mode == "Linear":
+            # Linear: map from crop min/max to 0-255
+            if crop_max > crop_min:
+                display_array = ((working_data - crop_min) / (crop_max - crop_min) * 255.0).astype(np.uint8)
+            else:
+                display_array = np.zeros_like(crop, dtype=np.uint8)
+
+        elif scale_mode == "Log":
+            # Log: apply log transformation, then normalize
+            working_data = np.log10(working_data + 1.0)
+            max_log = np.log10(65536.0)
+            display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+        elif scale_mode == "Normalization":
+            # Normalization: stretch actual min/max to full 0-255 range
             min_val = np.min(working_data)
             max_val = np.max(working_data)
             if max_val > min_val:
                 display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
             else:
                 display_array = np.zeros_like(crop, dtype=np.uint8)
-        else:
-            if log_view:
-                max_log = np.log10(65536.0)
-                display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+        elif scale_mode == "Equalization":
+            # Equalization: histogram equalization
+            min_val = np.min(working_data)
+            max_val = np.max(working_data)
+            if max_val > min_val:
+                normalized = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
             else:
-                display_array = (working_data / 65535.0 * 255.0).astype(np.uint8)
+                normalized = np.zeros_like(crop, dtype=np.uint8)
+
+            # Compute histogram
+            hist, _ = np.histogram(normalized.flatten(), bins=256, range=(0, 256))
+
+            # Compute cumulative distribution function (CDF)
+            cdf = hist.cumsum()
+
+            # Normalize CDF to range 0-255
+            cdf_normalized = ((cdf - cdf.min()) * 255 / (cdf.max() - cdf.min())).astype(np.uint8)
+
+            # Map pixel values through the normalized CDF
+            display_array = cdf_normalized[normalized]
+
+        else:
+            # Fallback to linear
+            if crop_max > crop_min:
+                display_array = ((working_data - crop_min) / (crop_max - crop_min) * 255.0).astype(np.uint8)
+            else:
+                display_array = np.zeros_like(crop, dtype=np.uint8)
 
         # Convert to QImage
         ydim, xdim = display_array.shape
@@ -199,6 +265,127 @@ class PixelCropWindow(QDialog):
         self.stats_label.setText(stats_text)
 
 
+class HistogramValueWindow(QDialog):
+    """Window for displaying histogram of pixel values"""
+
+    def __init__(self, parent=None):
+        """Initialize histogram value window"""
+        super().__init__(parent)
+        self.setWindowTitle("Pixel Value Histogram")
+        self.resize(800, 600)
+        self.setModal(False)
+
+        # Create layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Controls layout
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(QLabel("Display Mode:"))
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Actual", "Relative", "Bit"])
+        self.mode_combo.setToolTip("Actual: raw values\nRelative: normalized by bit depth (÷2^bits)\nBit: log2 of values")
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        controls_layout.addWidget(self.mode_combo)
+
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(QLabel("Bins:"))
+
+        self.bins_combo = QComboBox()
+        self.bins_combo.addItems(["50", "100", "200", "500", "1000"])
+        self.bins_combo.setCurrentIndex(2)  # Default to 200
+        self.bins_combo.setToolTip("Number of bins in histogram")
+        self.bins_combo.currentIndexChanged.connect(self._on_mode_changed)
+        controls_layout.addWidget(self.bins_combo)
+
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        # Create matplotlib figure
+        import matplotlib
+        matplotlib.use('Qt5Agg')
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+
+        self.figure = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+
+        self.ax = self.figure.add_subplot(1, 1, 1)
+        self.figure.tight_layout(pad=3.0)
+
+        # Store data for replotting
+        self.raw_data = None
+        self.filename = ""
+        self.bit_depth = 16
+
+    def update_histogram(self, raw_data: np.ndarray, filename: str = "", bit_depth: int = 16):
+        """
+        Update histogram with new data.
+
+        Args:
+            raw_data: Raw image data (2D numpy array)
+            filename: Optional filename for title
+            bit_depth: Bit depth of the image
+        """
+        if raw_data is None or len(raw_data.shape) != 2:
+            return
+
+        self.raw_data = raw_data
+        self.filename = filename
+        self.bit_depth = bit_depth
+
+        self._update_plot()
+
+    def _update_plot(self):
+        """Update plot based on current data and mode"""
+        if self.raw_data is None:
+            return
+
+        self.ax.clear()
+
+        mode = self.mode_combo.currentText()
+        bins = int(self.bins_combo.currentText())
+        flat_data = self.raw_data.flatten()
+
+        if mode == "Actual":
+            # Actual pixel values
+            self.ax.hist(flat_data, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+            self.ax.set_xlabel('Pixel Value')
+            self.ax.set_ylabel('Count')
+            self.ax.set_title(f'Pixel Value Histogram - Actual\n{self.filename}')
+
+        elif mode == "Relative":
+            # Normalize by 2^bit_depth
+            divisor = 2 ** self.bit_depth
+            relative_data = flat_data / divisor
+            self.ax.hist(relative_data, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+            self.ax.set_xlabel('Relative Value (÷ 2^bits)')
+            self.ax.set_ylabel('Count')
+            self.ax.set_title(f'Pixel Value Histogram - Relative\n{self.filename}')
+
+        elif mode == "Bit":
+            # Log2 of values (filter out zeros to avoid -inf)
+            nonzero_data = flat_data[flat_data > 0]
+            if len(nonzero_data) > 0:
+                log_data = np.log2(nonzero_data)
+                self.ax.hist(log_data, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+                self.ax.set_xlabel('log₂(Pixel Value)')
+                self.ax.set_ylabel('Count')
+                self.ax.set_title(f'Pixel Value Histogram - Bit\n{self.filename}')
+            else:
+                self.ax.text(0.5, 0.5, 'No non-zero pixels', ha='center', va='center', transform=self.ax.transAxes)
+
+        self.ax.grid(True, alpha=0.3)
+        self.figure.tight_layout(pad=2.0)
+        self.canvas.draw()
+
+    def _on_mode_changed(self, index: int):
+        """Handle mode change - replot histogram"""
+        self._update_plot()
+
+
 class ImageWindow(QDialog):
     """Window for displaying images with zoom controls"""
 
@@ -227,18 +414,27 @@ class ImageWindow(QDialog):
 
         # Store current image data for re-rendering with auto-scale
         self.current_raw_data = None
-        self.current_raw_data_original = None  # Original data before bad pixel removal
+        self.current_raw_data_original = None  # Original data before leaky pixel removal
+        self.current_raw_data_uncropped = None  # Original data before crop (for projections)
         self.current_file_path = None
         self.current_stats = None
         self.current_file_hash = None
         self.current_camera_id = None
-        self.current_bad_pixels = None  # List of (y, x) coordinates of bad pixels
+        self.current_leaky_pixels = None  # List of (y, x) coordinates of leaky pixels
+        self.original_width = None  # Original image width before crop
+        self.original_height = None  # Original image height before crop
 
         # Projection window (created on demand)
         self.projection_window = None
 
+        # Histogram value window (created on demand)
+        self.histogram_value_window = None
+
         # Pixel crop window (created on demand)
         self.pixel_crop_window = None
+
+        # Leaky pixel overlay graphics items
+        self.leaky_pixel_markers = []
 
         self._create_ui()
 
@@ -246,6 +442,15 @@ class ImageWindow(QDialog):
         """Create the user interface"""
         main_layout = QVBoxLayout()
         self.setLayout(main_layout)
+
+        # Menu bar
+        menu_bar = QMenuBar(self)
+        main_layout.setMenuBar(menu_bar)
+
+        # File menu
+        file_menu = menu_bar.addMenu("File")
+        close_action = file_menu.addAction("Close")
+        close_action.triggered.connect(self.hide if not self.standalone else self.close)
 
         # Header with filename (clickable to open in Finder)
         header_layout = QHBoxLayout()
@@ -275,42 +480,27 @@ class ImageWindow(QDialog):
             controls_layout.addWidget(self.btn_open)
             controls_layout.addSpacing(20)
 
-        # Auto Scale checkbox
-        self.auto_scale_checkbox = QCheckBox("Auto Scale")
-        self.auto_scale_checkbox.setChecked(True)  # Checked by default
-        self.auto_scale_checkbox.setToolTip("Scale display so min=black, max=white")
-        self.auto_scale_checkbox.stateChanged.connect(self._on_scaling_changed)
-        controls_layout.addWidget(self.auto_scale_checkbox)
+        # Scale Mode dropdown
+        controls_layout.addWidget(QLabel("Scale Mode:"))
+        self.scale_mode_combo = QComboBox()
+        self.scale_mode_combo.addItems(["Linear", "Log", "Normalization", "Equalization"])
+        self.scale_mode_combo.setCurrentIndex(1)  # Log by default
+        self.scale_mode_combo.setToolTip("Linear: direct pixel values\nLog: logarithmic scaling for HDR\nNormalization: stretch full range to 0-255\nEqualization: improve contrast via histogram redistribution")
+        self.scale_mode_combo.currentIndexChanged.connect(self._on_scaling_changed)
+        controls_layout.addWidget(self.scale_mode_combo)
 
-        # Log View checkbox
-        self.log_view_checkbox = QCheckBox("Log View")
-        self.log_view_checkbox.setChecked(True)  # Checked by default
-        self.log_view_checkbox.setToolTip("Apply logarithmic scaling for high dynamic range data")
-        self.log_view_checkbox.stateChanged.connect(self._on_scaling_changed)
-        controls_layout.addWidget(self.log_view_checkbox)
-
-        # Remove Bad Pixels checkbox
-        self.remove_bad_pixels_checkbox = QCheckBox("Remove Bad Pixels")
-        self.remove_bad_pixels_checkbox.setChecked(True)  # Checked by default
-        self.remove_bad_pixels_checkbox.setToolTip("Replace bad pixels with mean of neighbors")
-        self.remove_bad_pixels_checkbox.stateChanged.connect(self._on_scaling_changed)
-        controls_layout.addWidget(self.remove_bad_pixels_checkbox)
+        # Remove Leaky Pixels checkbox
+        self.remove_leaky_pixels_checkbox = QCheckBox("Remove Leaky Pixels")
+        self.remove_leaky_pixels_checkbox.setChecked(True)  # Checked by default
+        self.remove_leaky_pixels_checkbox.setToolTip("Replace leaky pixels with mean of neighbors")
+        self.remove_leaky_pixels_checkbox.stateChanged.connect(self._on_scaling_changed)
+        controls_layout.addWidget(self.remove_leaky_pixels_checkbox)
 
         controls_layout.addStretch()
 
-        # Projection button
-        self.btn_projection = QPushButton("Projection")
-        self.btn_projection.clicked.connect(self._on_show_projection)
-        controls_layout.addWidget(self.btn_projection)
-
-        # Close button
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.hide if not self.standalone else self.close)
-        controls_layout.addWidget(self.close_button)
-
         main_layout.addLayout(controls_layout)
 
-        # Main content area: image on left, bad pixels panel on right
+        # Main content area: image on left, leaky pixels panel on right
         content_layout = QHBoxLayout()
 
         # Left side: image and zoom controls
@@ -322,6 +512,10 @@ class ImageWindow(QDialog):
         self.graphics_view.setScene(self.graphics_scene)
         self.pixmap_item = QGraphicsPixmapItem()
         self.graphics_scene.addItem(self.pixmap_item)
+
+        # Connect mouse tracking signal
+        self.graphics_view.mouse_moved.connect(self._on_mouse_moved)
+
         left_layout.addWidget(self.graphics_view, stretch=1)
 
         # Zoom controls below image
@@ -357,68 +551,105 @@ class ImageWindow(QDialog):
 
         content_layout.addLayout(left_layout, stretch=3)
 
-        # Right side: Bad Pixels panel
-        bad_pixels_group = QGroupBox("Bad Pixels")
-        bad_pixels_layout = QVBoxLayout()
+        # Right side: Analysis and Leaky Pixels panels
+        right_layout = QVBoxLayout()
 
-        # Sigma input
-        sigma_layout = QHBoxLayout()
-        sigma_layout.addWidget(QLabel("Sigma (N):"))
-        self.sigma_spinbox = QSpinBox()
-        self.sigma_spinbox.setMinimum(1)
-        self.sigma_spinbox.setMaximum(20)
-        self.sigma_spinbox.setValue(6)
-        self.sigma_spinbox.setToolTip("Find pixels > mean + N × std_dev")
-        self.sigma_spinbox.valueChanged.connect(self._on_find_bad_pixels)
-        sigma_layout.addWidget(self.sigma_spinbox)
-        sigma_layout.addStretch()
-        bad_pixels_layout.addLayout(sigma_layout)
+        # Analysis panel
+        analysis_group = QGroupBox("Analysis")
+        analysis_layout = QHBoxLayout()
 
-        # Threshold display
-        threshold_layout = QHBoxLayout()
-        threshold_layout.addWidget(QLabel("Threshold:"))
-        self.threshold_field = QLineEdit()
-        self.threshold_field.setReadOnly(True)
-        self.threshold_field.setPlaceholderText("N/A")
-        threshold_layout.addWidget(self.threshold_field)
-        bad_pixels_layout.addLayout(threshold_layout)
+        # Projection button
+        self.btn_projection = QPushButton("Projection")
+        self.btn_projection.clicked.connect(self._on_show_projection)
+        analysis_layout.addWidget(self.btn_projection)
 
-        # Count display
+        # Histogram button
+        self.btn_histogram = QPushButton("Histogram")
+        self.btn_histogram.clicked.connect(self._on_show_histogram)
+        analysis_layout.addWidget(self.btn_histogram)
+
+        analysis_layout.addStretch()
+        analysis_group.setLayout(analysis_layout)
+        right_layout.addWidget(analysis_group)
+
+        # Leaky Pixels panel
+        leaky_pixels_group = QGroupBox("Leaky Pixels")
+        leaky_pixels_layout = QVBoxLayout()
+
+        # Sigma and Threshold on same line
+        sigma_threshold_layout = QHBoxLayout()
+        sigma_threshold_layout.addWidget(QLabel("Sigma:"))
+        self.sigma_combo = QComboBox()
+        self.sigma_combo.addItems(["6", "9", "12"])
+        self.sigma_combo.setCurrentIndex(0)  # 6 by default
+        self.sigma_combo.setToolTip("Find pixels > mean + σ × std_dev")
+        self.sigma_combo.currentIndexChanged.connect(self._on_find_leaky_pixels)
+        sigma_threshold_layout.addWidget(self.sigma_combo)
+        sigma_threshold_layout.addSpacing(20)
+        sigma_threshold_layout.addWidget(QLabel("Threshold:"))
+        self.threshold_label = QLabel("N/A")
+        self.threshold_label.setStyleSheet("font-weight: bold;")
+        sigma_threshold_layout.addWidget(self.threshold_label)
+        sigma_threshold_layout.addStretch()
+        leaky_pixels_layout.addLayout(sigma_threshold_layout)
+
+        # Total and Expected on same line
         count_layout = QHBoxLayout()
-        count_layout.addWidget(QLabel("# Bad Pixels:"))
-        self.bad_pixel_count_field = QLineEdit()
-        self.bad_pixel_count_field.setReadOnly(True)
-        self.bad_pixel_count_field.setPlaceholderText("0")
-        count_layout.addWidget(self.bad_pixel_count_field)
-        bad_pixels_layout.addLayout(count_layout)
+        count_layout.addWidget(QLabel("Total:"))
+        self.leaky_pixel_count_label = QLabel("0")
+        self.leaky_pixel_count_label.setStyleSheet("font-weight: bold;")
+        count_layout.addWidget(self.leaky_pixel_count_label)
+        count_layout.addSpacing(20)
+        count_layout.addWidget(QLabel("Expected:"))
+        self.expected_count_label = QLabel("N/A")
+        self.expected_count_label.setStyleSheet("font-weight: bold;")
+        self.expected_count_label.setToolTip("Expected leaky pixels for a normal distribution")
+        count_layout.addWidget(self.expected_count_label)
+        count_layout.addStretch()
+        leaky_pixels_layout.addLayout(count_layout)
 
-        # Expected (Normal Distribution) display
-        expected_layout = QHBoxLayout()
-        expected_layout.addWidget(QLabel("Expected (Normal):"))
-        self.expected_count_field = QLineEdit()
-        self.expected_count_field.setReadOnly(True)
-        self.expected_count_field.setPlaceholderText("N/A")
-        self.expected_count_field.setToolTip("Expected bad pixels for a normal distribution")
-        expected_layout.addWidget(self.expected_count_field)
-        bad_pixels_layout.addLayout(expected_layout)
+        # Show leaky pixels dropdown
+        show_pixels_layout = QHBoxLayout()
+        show_pixels_layout.addWidget(QLabel("Show Leaky Pixels:"))
+        self.show_leaky_pixels_combo = QComboBox()
+        self.show_leaky_pixels_combo.addItems(["Off", "1x1", "3x3", "5x5", "7x7", "9x9"])
+        self.show_leaky_pixels_combo.setCurrentIndex(0)  # Off by default
+        self.show_leaky_pixels_combo.setToolTip("Overlay red markers on image at leaky pixel locations")
+        self.show_leaky_pixels_combo.currentIndexChanged.connect(self._on_show_leaky_pixels_changed)
+        show_pixels_layout.addWidget(self.show_leaky_pixels_combo)
+        show_pixels_layout.addStretch()
+        leaky_pixels_layout.addLayout(show_pixels_layout)
 
         # Results table
-        self.bad_pixels_table = QTableWidget()
-        self.bad_pixels_table.setColumnCount(3)
-        self.bad_pixels_table.setHorizontalHeaderLabels(["Row", "Col", "Value"])
-        self.bad_pixels_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.bad_pixels_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.bad_pixels_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.bad_pixels_table.cellClicked.connect(self._on_bad_pixel_clicked)
-        bad_pixels_layout.addWidget(self.bad_pixels_table, stretch=1)
+        self.leaky_pixels_table = QTableWidget()
+        self.leaky_pixels_table.setColumnCount(3)
+        self.leaky_pixels_table.setHorizontalHeaderLabels(["Row", "Col", "Value"])
+        self.leaky_pixels_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.leaky_pixels_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.leaky_pixels_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.leaky_pixels_table.cellClicked.connect(self._on_leaky_pixel_clicked)
+        leaky_pixels_layout.addWidget(self.leaky_pixels_table, stretch=1)
 
-        bad_pixels_group.setLayout(bad_pixels_layout)
-        content_layout.addWidget(bad_pixels_group, stretch=1)
+        leaky_pixels_group.setLayout(leaky_pixels_layout)
+        right_layout.addWidget(leaky_pixels_group, stretch=1)
+
+        # Add right side layout to content
+        content_layout.addLayout(right_layout, stretch=1)
 
         main_layout.addLayout(content_layout, stretch=1)
 
         # Statistics panel
         stats_layout = QHBoxLayout()
+
+        # Stats display mode dropdown
+        self.stats_mode_combo = QComboBox()
+        self.stats_mode_combo.addItems(["Actual", "Relative", "Bit"])
+        self.stats_mode_combo.setToolTip("Actual: raw values\nRelative: normalized by bit depth (÷2^bits)\nBit: log2 of values")
+        self.stats_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.stats_mode_combo.setMaximumWidth(100)  # Limit width to 100 pixels
+        self.stats_mode_combo.currentIndexChanged.connect(self._on_stats_mode_changed)
+        stats_layout.addWidget(self.stats_mode_combo)
+
         self.stats_label = QLabel("No image statistics")
         stats_font = QFont("Monospace", 11)
         self.stats_label.setFont(stats_font)
@@ -426,9 +657,15 @@ class ImageWindow(QDialog):
         stats_layout.addWidget(self.stats_label)
         main_layout.addLayout(stats_layout)
 
+        # Pixel info label
+        self.pixel_info_label = QLabel("Move cursor over image to see pixel values")
+        self.pixel_info_label.setStyleSheet("color: #0066cc; font-weight: bold;")
+        main_layout.addWidget(self.pixel_info_label)
+
         # Status bar
-        self.status_label = QLabel("Ready")
-        main_layout.addWidget(self.status_label)
+        self.status_bar = QStatusBar()
+        main_layout.addWidget(self.status_bar)
+        self.status_bar.showMessage("Ready")
 
     def load_image(self, pixmap: QPixmap, display_array: np.ndarray, file_path: str,
                    stats: dict = None, raw_data: np.ndarray = None,
@@ -445,6 +682,9 @@ class ImageWindow(QDialog):
             file_hash: Optional file hash for database lookup
             camera_id: Optional camera ID for loading/saving attributes
         """
+        # Show loading status
+        self.status_bar.showMessage(f"Loading image: {Path(file_path).name}...")
+
         # Store current file path
         self.current_file_path = file_path
 
@@ -467,9 +707,19 @@ class ImageWindow(QDialog):
             self.current_file_hash = file_hash
             self.current_camera_id = camera_id
 
+        # Store original dimensions and uncropped data (before any cropping)
+        if raw_data is not None:
+            self.original_height, self.original_width = raw_data.shape
+            self.current_raw_data_uncropped = raw_data.copy()  # Save uncropped for projections
+        else:
+            self.original_width = stats.get('width') if stats else None
+            self.original_height = stats.get('height') if stats else None
+            self.current_raw_data_uncropped = None
+
         # Check for camera-specific crop settings
         # IMPORTANT: Crop is applied FIRST, before any other processing
         crop_applied = False
+
         if camera_id is not None and raw_data is not None:
             try:
                 from utils.db_manager import get_db_manager
@@ -485,6 +735,7 @@ class ImageWindow(QDialog):
                     # Apply crop if all values are set
                     if all(v is not None for v in [x_min, x_max, y_min, y_max]):
                         print(f"Applying camera crop: x[{x_min}:{x_max+1}], y[{y_min}:{y_max+1}]")
+                        self.status_bar.showMessage("Applying camera crop...", 1000)
                         raw_data = raw_data[y_min:y_max+1, x_min:x_max+1]
                         crop_applied = True
 
@@ -498,20 +749,24 @@ class ImageWindow(QDialog):
 
                             stats = {
                                 'bit_depth': stats.get('bit_depth', 16),
-                                'width': xdim,
-                                'height': ydim,
+                                'width': self.original_width,  # Keep original width
+                                'height': self.original_height,  # Keep original height
                                 'mean': mean_val,
                                 'std': std_val,
                                 'min': min_val,
                                 'max': max_val,
                                 'crop_applied': True,
-                                'crop_bounds': f"x[{x_min}:{x_max}], y[{y_min}:{y_max}]"
+                                'crop_bounds': f"x[{x_min}:{x_max}], y[{y_min}:{y_max}]",
+                                'cropped_width': xdim,
+                                'cropped_height': ydim,
+                                'original_width': self.original_width,
+                                'original_height': self.original_height
                             }
             except Exception as e:
                 print(f"Could not apply camera crop: {e}")
 
         # Store the cropped data as both current and original
-        # Original is the base data after crop but before bad pixel removal
+        # Original is the base data after crop but before leaky pixel removal
         self.current_raw_data = raw_data
         self.current_raw_data_original = raw_data.copy() if raw_data is not None else None
 
@@ -522,38 +777,64 @@ class ImageWindow(QDialog):
         if stats:
             self.set_statistics(stats)
 
-        # If Auto Scale or Log View is checked and we have raw data, apply scaling
-        if (self.auto_scale_checkbox.isChecked() or self.log_view_checkbox.isChecked()) and raw_data is not None and stats is not None:
-            auto_scale = self.auto_scale_checkbox.isChecked()
-            log_view = self.log_view_checkbox.isChecked()
-            print(f"Applying scaling on load: Auto Scale={auto_scale}, Log View={log_view}")
+        # Apply scaling if we have raw data
+        if raw_data is not None and stats is not None:
+            scale_mode = self.scale_mode_combo.currentText()
+            print(f"Applying scaling on load: Scale Mode={scale_mode}")
 
             # Start with raw data
             working_data = raw_data.astype(np.float32)
 
-            # Apply log scaling first if enabled
-            if log_view:
-                working_data = np.log10(working_data + 1.0)
+            # Apply scale mode transformation
+            if scale_mode == "Linear":
+                # Linear: map from stats min/max to 0-255
+                min_val = stats.get('min', 0)
+                max_val = stats.get('max', 65535)
+                if max_val > min_val:
+                    display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+                else:
+                    display_array = np.zeros_like(raw_data, dtype=np.uint8)
 
-            # Then apply auto-scale or normal scaling
-            if auto_scale:
+            elif scale_mode == "Log":
+                # Log: apply log transformation, then map to 0-255
+                working_data = np.log10(working_data + 1.0)
+                max_log = np.log10(65536.0)
+                display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+            elif scale_mode == "Normalization":
+                # Normalization: stretch actual min/max to full 0-255 range
                 min_val = np.min(working_data)
                 max_val = np.max(working_data)
                 if max_val > min_val:
                     display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
                 else:
                     display_array = np.zeros_like(raw_data, dtype=np.uint8)
-            else:
-                if log_view:
-                    max_log = np.log10(65536.0)
-                    display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+            elif scale_mode == "Equalization":
+                # Equalization: redistribute intensity values via histogram equalization
+                # First normalize to 0-255 range for histogram
+                min_val = np.min(working_data)
+                max_val = np.max(working_data)
+                if max_val > min_val:
+                    normalized = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
                 else:
-                    min_val = stats.get('min', 0)
-                    max_val = stats.get('max', 65535)
-                    if max_val > min_val:
-                        display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
-                    else:
-                        display_array = np.zeros_like(raw_data, dtype=np.uint8)
+                    normalized = np.zeros_like(raw_data, dtype=np.uint8)
+
+                # Compute histogram
+                hist, _ = np.histogram(normalized.flatten(), bins=256, range=(0, 256))
+
+                # Compute cumulative distribution function (CDF)
+                cdf = hist.cumsum()
+
+                # Normalize CDF to range 0-255
+                cdf_normalized = ((cdf - cdf.min()) * 255 / (cdf.max() - cdf.min())).astype(np.uint8)
+
+                # Map pixel values through the normalized CDF
+                display_array = cdf_normalized[normalized]
+
+            else:
+                # Fallback to linear
+                display_array = (working_data / 65535.0 * 255.0).astype(np.uint8)
 
             # Store for QImage
             self._temp_display_array = display_array
@@ -567,15 +848,31 @@ class ImageWindow(QDialog):
         # Display in graphics view
         self.pixmap_item.setPixmap(pixmap)
         self.graphics_scene.setSceneRect(QRectF(pixmap.rect()))
-        self.graphics_view.set_image(display_array)
+        self.graphics_view.set_image(display_array, raw_data)
+
+        # Update status
+        if stats:
+            self.status_bar.showMessage(f"Image loaded: {stats['width']}×{stats['height']} pixels", 2000)
+        else:
+            self.status_bar.showMessage("Image loaded", 2000)
 
         # Auto-update projection if window is open
         if self.projection_window is not None and self.projection_window.isVisible():
             filename = Path(file_path).name
+            # Use uncropped data for projections so sliders work with original coordinates
+            projection_data = self.current_raw_data_uncropped if self.current_raw_data_uncropped is not None else self.current_raw_data
             self.projection_window.update_histograms(
-                self.current_raw_data, filename,
+                projection_data, filename,
                 file_hash=self.current_file_hash,
                 camera_id=self.current_camera_id
+            )
+
+        # Auto-update histogram if window is open
+        if self.histogram_value_window is not None and self.histogram_value_window.isVisible():
+            filename = Path(file_path).name
+            bit_depth = stats.get('bit_depth', 16) if stats else 16
+            self.histogram_value_window.update_histogram(
+                self.current_raw_data, filename, bit_depth
             )
 
         # Fit to window if checkbox is checked
@@ -587,8 +884,8 @@ class ImageWindow(QDialog):
         # Update zoom label
         self._update_zoom_label()
 
-        # Automatically find bad pixels
-        self._on_find_bad_pixels()
+        # Automatically find leaky pixels
+        self._on_find_leaky_pixels()
 
     def _delayed_fit_to_window(self):
         """Delayed fit to window - ensures window is sized first"""
@@ -602,21 +899,76 @@ class ImageWindow(QDialog):
         Args:
             stats: Dictionary with keys: bit_depth, width, height, mean, std, min, max, crop_applied, crop_bounds
         """
+        # Store stats for reformatting when mode changes
+        self.current_stats = stats
+
+        # Format and display
+        self._update_stats_display()
+
+    def _update_stats_display(self) -> None:
+        """Update stats label based on current stats and display mode"""
+        if not self.current_stats:
+            return
+
+        stats = self.current_stats
+        mode = self.stats_mode_combo.currentText()
+        bit_depth = stats.get('bit_depth', 16)
+
+        # Format values based on mode
+        if mode == "Actual":
+            mean_str = f"{stats.get('mean', 0):.2f}"
+            std_str = f"{stats.get('std', 0):.2f}"
+            min_str = f"{stats.get('min', 0)}"
+            max_str = f"{stats.get('max', 0)}"
+        elif mode == "Relative":
+            # Normalize by 2^bit_depth
+            divisor = 2 ** bit_depth
+            mean_str = f"{stats.get('mean', 0) / divisor:.6f}"
+            std_str = f"{stats.get('std', 0) / divisor:.6f}"
+            min_str = f"{stats.get('min', 0) / divisor:.6f}"
+            max_str = f"{stats.get('max', 0) / divisor:.6f}"
+        elif mode == "Bit":
+            # Show log2 of values
+            import math
+            mean_val = stats.get('mean', 0)
+            std_val = stats.get('std', 0)
+            min_val = stats.get('min', 0)
+            max_val = stats.get('max', 0)
+
+            mean_str = f"{math.log2(mean_val):.2f}" if mean_val > 0 else "-inf"
+            std_str = f"{math.log2(std_val):.2f}" if std_val > 0 else "-inf"
+            min_str = f"{math.log2(min_val):.2f}" if min_val > 0 else "-inf"
+            max_str = f"{math.log2(max_val):.2f}" if max_val > 0 else "-inf"
+        else:
+            # Fallback to actual
+            mean_str = f"{stats.get('mean', 0):.2f}"
+            std_str = f"{stats.get('std', 0):.2f}"
+            min_str = f"{stats.get('min', 0)}"
+            max_str = f"{stats.get('max', 0)}"
+
         stats_text = (
-            f"Bit Depth: {stats.get('bit_depth', 'N/A')}-bit  |  "
+            f"Bit Depth: {bit_depth}-bit  |  "
             f"Dimensions: {stats.get('width', 0)} × {stats.get('height', 0)}  |  "
-            f"Mean: {stats.get('mean', 0):.2f}  |  "
-            f"Std Dev: {stats.get('std', 0):.2f}  |  "
-            f"Min: {stats.get('min', 0)}  |  "
-            f"Max: {stats.get('max', 0)}"
+            f"Mean: {mean_str}  |  "
+            f"Std Dev: {std_str}  |  "
+            f"Min: {min_str}  |  "
+            f"Max: {max_str}"
         )
 
         # Add crop indicator if crop was applied
         if stats.get('crop_applied'):
-            stats_text += f"  |  ⚠️ CROP ACTIVE: {stats.get('crop_bounds', '')}"
+            cropped_w = stats.get('cropped_width')
+            cropped_h = stats.get('cropped_height')
+            if cropped_w and cropped_h:
+                stats_text += f"  |  ⚠️ CROP ACTIVE: {stats.get('crop_bounds', '')} → {cropped_w}×{cropped_h}"
+            else:
+                stats_text += f"  |  ⚠️ CROP ACTIVE: {stats.get('crop_bounds', '')}"
 
         self.stats_label.setText(stats_text)
-        self.current_stats = stats
+
+    def _on_stats_mode_changed(self, index: int) -> None:
+        """Handle stats display mode change - reformat current stats"""
+        self._update_stats_display()
 
     def _on_fit_to_window_changed(self, state: int) -> None:
         """Handle fit to window checkbox change"""
@@ -696,7 +1048,7 @@ class ImageWindow(QDialog):
 
             except Exception as e:
                 # Show error in status
-                self.status_label.setText(f"Error loading image: {str(e)}")
+                self.status_bar.showMessage(f"Error loading image: {str(e)}")
                 print(f"Error loading {file_path}: {e}")
                 import traceback
                 traceback.print_exc()
@@ -707,18 +1059,17 @@ class ImageWindow(QDialog):
         self.zoom_label.setText(f"Zoom: {zoom_percent:.0f}%")
 
     def _on_scaling_changed(self, state: int) -> None:
-        """Handle scaling checkbox changes - re-render image with new scaling"""
+        """Handle scaling changes - re-render image with new scaling"""
         if self.current_raw_data is not None and self.current_stats is not None:
-            auto_scale = self.auto_scale_checkbox.isChecked()
-            log_view = self.log_view_checkbox.isChecked()
-            remove_bad_pixels = self.remove_bad_pixels_checkbox.isChecked()
-            print(f"Scaling changed: Auto Scale={auto_scale}, Log View={log_view}, Remove Bad Pixels={remove_bad_pixels}")
+            scale_mode = self.scale_mode_combo.currentText()
+            remove_leaky_pixels = self.remove_leaky_pixels_checkbox.isChecked()
+            print(f"Scaling changed: Scale Mode={scale_mode}, Remove Leaky Pixels={remove_leaky_pixels}")
 
-            # Use cleaned data if remove bad pixels is checked and bad pixels have been found
-            if remove_bad_pixels and self.current_bad_pixels is not None and len(self.current_bad_pixels) > 0:
+            # Use cleaned data if remove leaky pixels is checked and leaky pixels have been found
+            if remove_leaky_pixels and self.current_leaky_pixels is not None and len(self.current_leaky_pixels) > 0:
                 source_data = self.current_raw_data_original if self.current_raw_data_original is not None else self.current_raw_data
-                raw_data = self._remove_bad_pixels(source_data, self.current_bad_pixels)
-                print(f"  Removed {len(self.current_bad_pixels)} bad pixels")
+                raw_data = self._remove_leaky_pixels(source_data, self.current_leaky_pixels)
+                print(f"  Removed {len(self.current_leaky_pixels)} leaky pixels")
             else:
                 raw_data = self.current_raw_data_original if self.current_raw_data_original is not None else self.current_raw_data
 
@@ -727,42 +1078,65 @@ class ImageWindow(QDialog):
             # Start with raw data
             working_data = raw_data.astype(np.float32)
 
-            # Apply log scaling first if enabled
-            if log_view:
-                print(f"  Applying log scaling")
-                # Add 1 to avoid log(0), then apply log
-                working_data = np.log10(working_data + 1.0)
-
-            # Then apply auto-scale or normal scaling
-            if auto_scale:
-                # Auto-scale: scale data range to 0-255
-                min_val = np.min(working_data)
-                max_val = np.max(working_data)
-                print(f"  Auto-scaling from {min_val:.2f} to {max_val:.2f}")
+            # Apply scaling based on mode
+            if scale_mode == "Linear":
+                # Linear: map from stats min/max to 0-255
+                min_val = self.current_stats.get('min', 0)
+                max_val = self.current_stats.get('max', 65535)
                 if max_val > min_val:
                     display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
                 else:
                     display_array = np.zeros_like(raw_data, dtype=np.uint8)
-            else:
-                # Normal scaling: map to full 16-bit range
-                print(f"  Normal scaling")
-                if log_view:
-                    # For log view without auto-scale, normalize to typical log range
-                    max_log = np.log10(65536.0)  # log10 of max 16-bit value
-                    display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+            elif scale_mode == "Log":
+                # Log: apply log transformation, then map to 0-255
+                print(f"  Applying log scaling")
+                working_data = np.log10(working_data + 1.0)
+                max_log = np.log10(65536.0)
+                display_array = np.clip(working_data / max_log * 255.0, 0, 255).astype(np.uint8)
+
+            elif scale_mode == "Normalization":
+                # Normalization: stretch actual min/max to full 0-255 range
+                min_val = np.min(working_data)
+                max_val = np.max(working_data)
+                print(f"  Normalizing from {min_val:.2f} to {max_val:.2f}")
+                if max_val > min_val:
+                    display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
                 else:
-                    # Standard 16-bit to 8-bit conversion
-                    if raw_data.dtype == np.uint16:
-                        display_array = (working_data / 65535.0 * 255.0).astype(np.uint8)
-                    elif raw_data.dtype == np.uint8:
-                        display_array = raw_data.copy()
-                    else:
-                        min_val = np.min(working_data)
-                        max_val = np.max(working_data)
-                        if max_val > min_val:
-                            display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
-                        else:
-                            display_array = np.zeros_like(raw_data, dtype=np.uint8)
+                    display_array = np.zeros_like(raw_data, dtype=np.uint8)
+
+            elif scale_mode == "Equalization":
+                # Equalization: redistribute intensity values via histogram equalization
+                print(f"  Applying histogram equalization")
+                min_val = np.min(working_data)
+                max_val = np.max(working_data)
+                print(f"  Input range: {min_val:.2f} to {max_val:.2f}")
+                if max_val > min_val:
+                    normalized = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+                else:
+                    normalized = np.zeros_like(raw_data, dtype=np.uint8)
+
+                # Compute histogram
+                hist, _ = np.histogram(normalized.flatten(), bins=256, range=(0, 256))
+
+                # Compute cumulative distribution function (CDF)
+                cdf = hist.cumsum()
+
+                # Normalize CDF to range 0-255
+                cdf_normalized = ((cdf - cdf.min()) * 255 / (cdf.max() - cdf.min())).astype(np.uint8)
+
+                # Map pixel values through the normalized CDF
+                display_array = cdf_normalized[normalized]
+                print(f"  Histogram equalized: CDF range {cdf.min()} to {cdf.max()}")
+
+            else:
+                # Fallback: use linear mode
+                min_val = self.current_stats.get('min', 0)
+                max_val = self.current_stats.get('max', 65535)
+                if max_val > min_val:
+                    display_array = ((working_data - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+                else:
+                    display_array = np.zeros_like(raw_data, dtype=np.uint8)
 
             # Store the display array to keep it alive for QImage
             self._temp_display_array = display_array
@@ -775,21 +1149,17 @@ class ImageWindow(QDialog):
             print(f"  Updating display with new pixmap ({pixmap.width()}x{pixmap.height()})")
             self.pixmap_item.setPixmap(pixmap)
             self.graphics_scene.setSceneRect(QRectF(pixmap.rect()))
-            self.graphics_view.set_image(display_array)
+            self.graphics_view.set_image(display_array, raw_data)
 
             # Update status
-            status_parts = []
-            if auto_scale:
-                status_parts.append("Auto Scale: ON")
-            if log_view:
-                status_parts.append("Log View: ON")
-            status_text = f"Image: {xdim}x{ydim} pixels"
-            if status_parts:
-                status_text += " | " + " | ".join(status_parts)
-            self.status_label.setText(status_text)
+            self.status_bar.showMessage(f"Scaling applied: {scale_mode}", 2000)  # Show for 2 seconds
 
             # Update pixel crop window if it's open
             self._update_pixel_crop_window()
+
+    def _on_mouse_moved(self, x: int, y: int, pixel_value: int) -> None:
+        """Handle mouse movement over image - display pixel coordinates and value"""
+        self.pixel_info_label.setText(f"x={x}, y={y}, value={pixel_value}")
 
     def _on_path_clicked(self, event) -> None:
         """Handle path label click - open Finder and highlight file"""
@@ -806,53 +1176,56 @@ class ImageWindow(QDialog):
             except Exception as e:
                 print(f"Error opening file location: {e}")
 
-    def _on_find_bad_pixels(self) -> None:
-        """Handle Find button - identify bad pixels above threshold"""
+    def _on_find_leaky_pixels(self) -> None:
+        """Handle Find button - identify leaky pixels above threshold"""
         if self.current_raw_data is None:
-            self.threshold_field.setText("N/A")
-            self.bad_pixel_count_field.setText("0")
-            self.bad_pixels_table.setRowCount(0)
+            self.threshold_label.setText("N/A")
+            self.leaky_pixel_count_label.setText("0")
+            self.leaky_pixels_table.setRowCount(0)
             return
 
-        try:
-            # Get sigma value
-            sigma = self.sigma_spinbox.value()
+        # Show finding status
+        self.status_bar.showMessage("Finding leaky pixels...")
 
-            # Use original data for finding bad pixels
+        try:
+            # Get sigma value from combo box
+            sigma = int(self.sigma_combo.currentText())
+
+            # Use original data for finding leaky pixels
             raw_data = self.current_raw_data_original if self.current_raw_data_original is not None else self.current_raw_data
             mean_val = float(np.mean(raw_data))
             std_val = float(np.std(raw_data))
             threshold = mean_val + sigma * std_val
 
-            # Find bad pixels (values > threshold)
+            # Find leaky pixels (values > threshold)
             bad_mask = raw_data > threshold
             bad_coords = np.argwhere(bad_mask)  # Returns array of [y, x] coordinates
             bad_values = raw_data[bad_mask]
 
-            # Store bad pixel coordinates for removal
-            self.current_bad_pixels = bad_coords
+            # Store leaky pixel coordinates for removal
+            self.current_leaky_pixels = bad_coords
 
-            # Update threshold field
-            self.threshold_field.setText(f"{threshold:.2f}")
+            # Update threshold label
+            self.threshold_label.setText(f"{threshold:.2f}")
 
             # Calculate total pixels and percentage
             total_pixels = raw_data.shape[0] * raw_data.shape[1]
-            bad_pixel_percentage = (len(bad_coords) / total_pixels) * 100 if total_pixels > 0 else 0
+            leaky_pixel_percentage = (len(bad_coords) / total_pixels) * 100 if total_pixels > 0 else 0
 
             # Calculate expected number for normal distribution
             from scipy.stats import norm
             probability = 1 - norm.cdf(sigma)  # Right tail probability
-            expected_bad_pixels = total_pixels * probability
-            expected_percentage = (expected_bad_pixels / total_pixels) * 100 if total_pixels > 0 else 0
+            expected_leaky_pixels = total_pixels * probability
+            expected_percentage = (expected_leaky_pixels / total_pixels) * 100 if total_pixels > 0 else 0
 
-            # Update count field with percentage
-            self.bad_pixel_count_field.setText(f"{len(bad_coords)} ({bad_pixel_percentage:.3f}%)")
+            # Update count label with percentage
+            self.leaky_pixel_count_label.setText(f"{len(bad_coords)} ({leaky_pixel_percentage:.3f}%)")
 
-            # Update expected field
-            self.expected_count_field.setText(f"{expected_bad_pixels:.1f} ({expected_percentage:.3f}%)")
+            # Update expected label
+            self.expected_count_label.setText(f"{expected_leaky_pixels:.1f} ({expected_percentage:.3f}%)")
 
             # Clear and populate table
-            self.bad_pixels_table.setRowCount(0)
+            self.leaky_pixels_table.setRowCount(0)
 
             if len(bad_coords) > 0:
                 # Sort by value (highest first)
@@ -860,7 +1233,7 @@ class ImageWindow(QDialog):
 
                 # Show up to 1000 pixels in table
                 max_display = min(1000, len(bad_coords))
-                self.bad_pixels_table.setRowCount(max_display)
+                self.leaky_pixels_table.setRowCount(max_display)
 
                 for i in range(max_display):
                     idx = sorted_indices[i]
@@ -868,30 +1241,38 @@ class ImageWindow(QDialog):
                     value = bad_values[idx]
 
                     # Add row to table
-                    self.bad_pixels_table.setItem(i, 0, QTableWidgetItem(str(y)))
-                    self.bad_pixels_table.setItem(i, 1, QTableWidgetItem(str(x)))
-                    self.bad_pixels_table.setItem(i, 2, QTableWidgetItem(str(value)))
+                    self.leaky_pixels_table.setItem(i, 0, QTableWidgetItem(str(y)))
+                    self.leaky_pixels_table.setItem(i, 1, QTableWidgetItem(str(x)))
+                    self.leaky_pixels_table.setItem(i, 2, QTableWidgetItem(str(value)))
 
-            print(f"Bad pixel search: {len(bad_coords)} pixels found above threshold {threshold:.2f}")
+            print(f"Leaky pixel search: {len(bad_coords)} pixels found above threshold {threshold:.2f}")
 
-            # If remove bad pixels is checked, trigger re-render
-            if self.remove_bad_pixels_checkbox.isChecked():
+            # Update status
+            self.status_bar.showMessage(f"Found {len(bad_coords)} leaky pixels", 2000)
+
+            # Update leaky pixel markers if show is not Off
+            if self.show_leaky_pixels_combo.currentText() != "Off":
+                self._remove_leaky_pixel_markers()
+                self._add_leaky_pixel_markers()
+
+            # If remove leaky pixels is checked, trigger re-render
+            if self.remove_leaky_pixels_checkbox.isChecked():
                 self._on_scaling_changed(0)
 
         except Exception as e:
-            self.threshold_field.setText("Error")
-            self.bad_pixel_count_field.setText("0")
-            print(f"Error in bad pixel search: {e}")
+            self.threshold_label.setText("Error")
+            self.leaky_pixel_count_label.setText("0")
+            print(f"Error in leaky pixel search: {e}")
             import traceback
             traceback.print_exc()
 
-    def _remove_bad_pixels(self, raw_data: np.ndarray, bad_coords: np.ndarray) -> np.ndarray:
+    def _remove_leaky_pixels(self, raw_data: np.ndarray, bad_coords: np.ndarray) -> np.ndarray:
         """
-        Remove bad pixels by replacing with mean of neighbors.
+        Remove leaky pixels by replacing with mean of neighbors.
 
         Args:
             raw_data: Raw image data
-            bad_coords: Array of [y, x] coordinates of bad pixels
+            bad_coords: Array of [y, x] coordinates of leaky pixels
 
         Returns:
             Cleaned image data
@@ -915,7 +1296,7 @@ class ImageWindow(QDialog):
                     if 0 <= ny < height and 0 <= nx < width:
                         neighbors.append(raw_data[ny, nx])
 
-            # Replace bad pixel with mean of neighbors
+            # Replace leaky pixel with mean of neighbors
             if len(neighbors) > 0:
                 cleaned_data[y, x] = int(np.mean(neighbors))
 
@@ -929,7 +1310,7 @@ class ImageWindow(QDialog):
 
             # Get current scaling settings
             auto_scale = self.auto_scale_checkbox.isChecked()
-            log_view = self.log_view_checkbox.isChecked()
+            scale_mode = self.scale_mode_combo.currentText()
 
             # Refresh the crop window with new scaling
             self.pixel_crop_window.update_crop(
@@ -938,33 +1319,32 @@ class ImageWindow(QDialog):
                 self.pixel_crop_window.current_x,
                 self.pixel_crop_window.current_value,
                 auto_scale,
-                log_view
+                scale_mode
             )
-            print(f"Updated pixel crop window with Auto Scale={auto_scale}, Log View={log_view}")
+            print(f"Updated pixel crop window with Auto Scale={auto_scale}, Scale Mode={scale_mode}")
 
-    def _on_bad_pixel_clicked(self, row: int, column: int) -> None:
-        """Handle bad pixel table click - show 32x32 crop around pixel"""
+    def _on_leaky_pixel_clicked(self, row: int, column: int) -> None:
+        """Handle leaky pixel table click - show 32x32 crop around pixel"""
         if self.current_raw_data is None:
             return
 
         try:
             # Get pixel coordinates and value from table
-            y = int(self.bad_pixels_table.item(row, 0).text())
-            x = int(self.bad_pixels_table.item(row, 1).text())
-            value = int(self.bad_pixels_table.item(row, 2).text())
+            y = int(self.leaky_pixels_table.item(row, 0).text())
+            x = int(self.leaky_pixels_table.item(row, 1).text())
+            value = int(self.leaky_pixels_table.item(row, 2).text())
 
             # Create pixel crop window if it doesn't exist
             if self.pixel_crop_window is None:
                 self.pixel_crop_window = PixelCropWindow(self)
 
             # Get current scaling settings
-            auto_scale = self.auto_scale_checkbox.isChecked()
-            log_view = self.log_view_checkbox.isChecked()
+            scale_mode = self.scale_mode_combo.currentText()
 
             # Update the crop window
             self.pixel_crop_window.update_crop(
                 self.current_raw_data, y, x, value,
-                auto_scale, log_view
+                scale_mode
             )
 
             # Show the window
@@ -977,10 +1357,64 @@ class ImageWindow(QDialog):
             import traceback
             traceback.print_exc()
 
+    def _on_show_leaky_pixels_changed(self, index: int) -> None:
+        """Handle Show Leaky Pixels dropdown - overlay red markers on image"""
+        # Remove existing markers
+        self._remove_leaky_pixel_markers()
+
+        # Add new markers if not Off
+        if self.show_leaky_pixels_combo.currentText() != "Off":
+            self._add_leaky_pixel_markers()
+
+    def _add_leaky_pixel_markers(self) -> None:
+        """Add red markers for each leaky pixel based on selected size"""
+        if self.current_leaky_pixels is None or len(self.current_leaky_pixels) == 0:
+            return
+
+        from PyQt6.QtGui import QPen, QBrush, QColor
+
+        # Get marker size from dropdown
+        size_text = self.show_leaky_pixels_combo.currentText()
+        if size_text == "Off":
+            return
+
+        # Parse size (e.g., "1x1" -> 1, "3x3" -> 3, "5x5" -> 5)
+        size = int(size_text.split('x')[0])
+
+        # Create red pen and brush
+        pen = QPen(QColor(255, 0, 0))
+        pen.setWidth(0)  # Cosmetic pen (always 1 pixel wide regardless of zoom)
+        brush = QBrush(QColor(255, 0, 0, 180))  # Semi-transparent red
+
+        # Add marker for each leaky pixel
+        for y, x in self.current_leaky_pixels:
+            if size == 1:
+                # Single pixel: draw a 1x1 rectangle
+                rect = self.graphics_scene.addRect(x, y, 1, 1, pen, brush)
+                rect.setZValue(100)
+                self.leaky_pixel_markers.append(rect)
+            else:
+                # Multi-pixel: draw a square centered on the pixel
+                half_size = size // 2
+                rect = self.graphics_scene.addRect(
+                    x - half_size, y - half_size, size, size, pen, brush
+                )
+                rect.setZValue(100)
+                self.leaky_pixel_markers.append(rect)
+
+        print(f"Added {len(self.leaky_pixel_markers)} leaky pixel markers ({size_text})")
+
+    def _remove_leaky_pixel_markers(self) -> None:
+        """Remove all leaky pixel markers from the scene"""
+        for marker in self.leaky_pixel_markers:
+            self.graphics_scene.removeItem(marker)
+        self.leaky_pixel_markers.clear()
+        print("Removed all leaky pixel markers")
+
     def _on_show_projection(self) -> None:
         """Handle Projection button - show axis projection plots"""
         if self.current_raw_data is None:
-            self.status_label.setText("No image data available for projections")
+            self.status_bar.showMessage("No image data available for projections", 3000)
             return
 
         # Create projection window if it doesn't exist
@@ -990,8 +1424,10 @@ class ImageWindow(QDialog):
 
         # Update with current data
         filename = Path(self.current_file_path).name if self.current_file_path else ""
+        # Use uncropped data for projections so sliders work with original coordinates
+        projection_data = self.current_raw_data_uncropped if self.current_raw_data_uncropped is not None else self.current_raw_data
         self.projection_window.update_histograms(
-            self.current_raw_data, filename,
+            projection_data, filename,
             file_hash=self.current_file_hash,
             camera_id=self.current_camera_id
         )
@@ -1000,6 +1436,28 @@ class ImageWindow(QDialog):
         self.projection_window.show()
         self.projection_window.raise_()
         self.projection_window.activateWindow()
+
+    def _on_show_histogram(self) -> None:
+        """Handle Histogram button - show pixel value histogram"""
+        if self.current_raw_data is None:
+            self.status_bar.showMessage("No image data available for histogram", 3000)
+            return
+
+        # Create histogram window if it doesn't exist
+        if self.histogram_value_window is None:
+            self.histogram_value_window = HistogramValueWindow(self)
+
+        # Update with current data (use cropped data for histogram)
+        filename = Path(self.current_file_path).name if self.current_file_path else ""
+        bit_depth = self.current_stats.get('bit_depth', 16) if self.current_stats else 16
+        self.histogram_value_window.update_histogram(
+            self.current_raw_data, filename, bit_depth
+        )
+
+        # Show the window
+        self.histogram_value_window.show()
+        self.histogram_value_window.raise_()
+        self.histogram_value_window.activateWindow()
 
     def resizeEvent(self, event) -> None:
         """Handle window resize - auto-fit if checkbox is checked"""
@@ -1045,4 +1503,4 @@ class ImageWindow(QDialog):
         self.graphics_scene.clear()
         self.pixmap_item = QGraphicsPixmapItem()
         self.graphics_scene.addItem(self.pixmap_item)
-        self.status_label.setText("Ready")
+        self.status_bar.showMessage("Ready")

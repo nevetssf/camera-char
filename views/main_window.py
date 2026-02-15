@@ -29,22 +29,35 @@ class MainWindow(QMainWindow):
         """Initialize the main window"""
         super().__init__()
 
-        # Set window title with version
-        title = "Sensor Analysis"
-        if version:
-            title = f"{title} {version}"
-        self.setWindowTitle(title)
+        # Store version for title updates
+        self.version = version
+
+        # Set window title with version and working directory
+        self._update_window_title()
         self.setGeometry(100, 100, 1600, 900)
 
         # Create UI components
         self._create_actions()
         self._create_menu_bar()
-        self._create_toolbar()
+        # Toolbar disabled - using menu items instead
+        # self._create_toolbar()
         self._create_status_bar()
         self._create_central_widget()
 
         # Update database status
         self.update_db_status()
+
+    def _update_window_title(self) -> None:
+        """Update window title to show version and working directory"""
+        from utils.config_manager import get_config
+        config = get_config()
+        working_dir = config.get_working_dir()
+
+        title = "Sensor Analysis"
+        if self.version:
+            title = f"{title} {self.version}"
+        title = f"{title} - {working_dir}"
+        self.setWindowTitle(title)
 
     def _create_actions(self) -> None:
         """Create menu and toolbar actions"""
@@ -83,6 +96,10 @@ class MainWindow(QMainWindow):
         self.action_set_working_dir = QAction("Set Working Directory...", self)
         self.action_set_working_dir.setStatusTip("Set working directory for analysis results")
         self.action_set_working_dir.triggered.connect(self._on_set_working_dir)
+
+        self.action_move_working_dir = QAction("Move Working Directory...", self)
+        self.action_move_working_dir.setStatusTip("Move all data to a new working directory")
+        self.action_move_working_dir.triggered.connect(self._on_move_working_dir)
 
         self.action_change_source = QAction("Change Image Source...", self)
         self.action_change_source.setStatusTip("Change image source directory (will clear database)")
@@ -182,6 +199,7 @@ class MainWindow(QMainWindow):
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
         settings_menu.addAction(self.action_set_working_dir)
+        settings_menu.addAction(self.action_move_working_dir)
         settings_menu.addSeparator()
         settings_menu.addAction(self.action_enable_logging)
         settings_menu.addAction(self.action_view_log)
@@ -376,6 +394,7 @@ class MainWindow(QMainWindow):
         if directory:
             try:
                 config.set_working_dir(directory)
+                self._update_window_title()
                 self.status_bar.showMessage(f"Working directory set to: {directory}")
                 QMessageBox.information(
                     self,
@@ -389,6 +408,126 @@ class MainWindow(QMainWindow):
                     "Error",
                     f"Failed to set working directory:\n{str(e)}"
                 )
+
+    def _on_move_working_dir(self) -> None:
+        """Handle move working directory action - moves all data to new location"""
+        from utils.config_manager import get_config
+        import shutil
+        from pathlib import Path
+
+        config = get_config()
+        current_dir = config.get_working_dir()
+
+        # Select new directory
+        new_directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select New Working Directory Location",
+            str(current_dir.parent),
+            QFileDialog.Option.ShowDirsOnly
+        )
+
+        if not new_directory:
+            return
+
+        new_path = Path(new_directory)
+
+        # Check if it's the same directory
+        if new_path == current_dir:
+            QMessageBox.information(
+                self,
+                "Same Directory",
+                "The selected directory is the same as the current working directory."
+            )
+            return
+
+        # Check if new directory already exists and is not empty
+        if new_path.exists() and any(new_path.iterdir()):
+            QMessageBox.warning(
+                self,
+                "Directory Not Empty",
+                f"The selected directory is not empty:\n{new_path}\n\n"
+                "Please select an empty directory or a new location."
+            )
+            return
+
+        # Confirm with user
+        response = QMessageBox.question(
+            self,
+            "Confirm Move",
+            f"This will move all data from:\n"
+            f"  {current_dir}\n\n"
+            f"To:\n"
+            f"  {new_path}\n\n"
+            f"This includes:\n"
+            f"• Database files\n"
+            f"• Configuration files\n"
+            f"• Cache and log files\n\n"
+            f"Do you want to continue?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel
+        )
+
+        if response != QMessageBox.StandardButton.Ok:
+            return
+
+        try:
+            # Show progress
+            self.status_bar.showMessage("Moving working directory...")
+
+            # Create new directory if it doesn't exist
+            new_path.mkdir(parents=True, exist_ok=True)
+
+            # Move all files and subdirectories
+            for item in current_dir.iterdir():
+                src = item
+                dst = new_path / item.name
+
+                if item.is_dir():
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                    shutil.rmtree(src)
+                else:
+                    shutil.copy2(src, dst)
+                    src.unlink()
+
+            # Try to remove old directory if empty
+            try:
+                current_dir.rmdir()
+            except OSError:
+                # Directory not empty or other error - not critical
+                pass
+
+            # Update config to new directory
+            config.set_working_dir(str(new_path))
+
+            # Update window title
+            self._update_window_title()
+
+            # Update database status
+            self.update_db_status()
+
+            # Reload data browser to use new database location
+            try:
+                self.data_browser.reload_data()
+            except Exception:
+                pass
+
+            # Success message
+            self.status_bar.showMessage(f"Working directory moved to: {new_path}", 10000)
+            QMessageBox.information(
+                self,
+                "Move Complete",
+                f"Working directory successfully moved to:\n{new_path}\n\n"
+                "All data has been transferred to the new location."
+            )
+
+        except Exception as e:
+            self.status_bar.showMessage("Failed to move working directory", 10000)
+            QMessageBox.critical(
+                self,
+                "Move Failed",
+                f"Failed to move working directory:\n\n{str(e)}\n\n"
+                "Some files may have been copied. Please check both directories."
+            )
 
     def _on_change_source(self) -> None:
         """Handle change image source action"""
@@ -798,10 +937,12 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_load_new(self) -> None:
-        """Handle load new images with analysis action (non-blocking)"""
-        from PyQt6.QtCore import QThread, pyqtSignal, QTimer
-        from PyQt6.QtWidgets import QMessageBox
+        """Handle load new images with analysis action with blocking progress dialog"""
+        from PyQt6.QtCore import QThread, pyqtSignal
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         from utils.analysis_runner import AnalysisRunner
+        import re
+        import time
 
         # Check if already loading
         if hasattr(self, '_load_thread') and self._load_thread and self._load_thread.isRunning():
@@ -820,32 +961,126 @@ class MainWindow(QMainWindow):
             def __init__(self, limit):
                 super().__init__()
                 self.limit = limit
+                self.cancel_requested = False
 
             def run(self):
                 try:
                     runner = AnalysisRunner()
                     result = runner.load_new_images(
                         progress_callback=lambda msg: self.progress.emit(msg),
-                        limit=self.limit
+                        limit=self.limit,
+                        cancel_flag=lambda: self.cancel_requested
                     )
                     self.finished_signal.emit(result)
                 except Exception as e:
-                    self.error.emit(str(e))
+                    import traceback
+                    self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
 
         self._load_thread = LoadThread(limit)
 
-        # Timer to refresh data browser periodically during loading
-        self._refresh_timer = QTimer()
-        self._refresh_timer.timeout.connect(self._refresh_during_load)
+        # Create blocking progress dialog
+        limit_msg = f" (limited to {limit})" if limit else ""
+        progress_dialog = QProgressDialog(f"Preparing to load new images{limit_msg}...", "Cancel", 0, 100, self)
+        progress_dialog.setWindowTitle("Load New Images")
+        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setAutoReset(False)
+        progress_dialog.setMinimumDuration(0)  # Show immediately
+        progress_dialog.setValue(0)
+        progress_dialog.setFixedWidth(450)
+
+        # Center the cancel button using stylesheet
+        progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                min-width: 450px;
+            }
+            QDialogButtonBox {
+                button-layout: 3;  /* Center layout */
+            }
+            QPushButton {
+                min-width: 100px;
+            }
+        """)
+
+        # Track timing for ETA
+        start_time = time.time()
+        phase_start_time = start_time
+
+        def format_time(seconds):
+            """Format seconds into human-readable time"""
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                mins = int(seconds / 60)
+                secs = int(seconds % 60)
+                return f"{mins}m {secs}s"
+            else:
+                hours = int(seconds / 3600)
+                mins = int((seconds % 3600) / 60)
+                return f"{hours}h {mins}m"
 
         def on_progress(message):
-            # Update status bar with progress
-            self.status_bar.showMessage(f"Loading: {message}", 3000)
+            nonlocal phase_start_time
+
+            # Check if dialog was cancelled
+            if progress_dialog.wasCanceled():
+                self._load_thread.cancel_requested = True
+                return
+
+            # Parse progress message
+            # Format: "Loading: Image 1/250 - filename" or "Building file list: ..."
+            match = re.match(r'(?:Loading|Scanning):\s+(?:Image|Checking)?\s*(\d+)/(\d+)', message)
+
+            if match:
+                current = int(match.group(1))
+                total = int(match.group(2))
+
+                # Calculate progress percentage
+                progress_pct = int((current / total) * 100)
+                progress_dialog.setValue(progress_pct)
+
+                # Calculate ETA
+                elapsed = time.time() - phase_start_time
+                if current > 0 and elapsed > 0:
+                    time_per_item = elapsed / current
+                    remaining_items = total - current
+                    eta_seconds = time_per_item * remaining_items
+                    eta_str = format_time(eta_seconds)
+
+                    # Extract additional info from message (filename, camera, etc.)
+                    detail = message.split(' - ', 1)[1] if ' - ' in message else ''
+                    if len(detail) > 60:
+                        detail = detail[:57] + '...'
+
+                    # Update dialog label with progress, ETA, and detail
+                    label_text = f"Loading New Images\n"
+                    label_text += f"Progress: {current}/{total} ({progress_pct}%)\n"
+                    label_text += f"Time remaining: {eta_str}\n"
+                    if detail:
+                        label_text += f"\n{detail}"
+                else:
+                    label_text = f"Loading New Images\n{current}/{total} images"
+
+                progress_dialog.setLabelText(label_text)
+            else:
+                # Handle special status messages (building file list, etc.)
+                progress_dialog.setLabelText(message)
 
         def on_finished(result):
-            # Stop refresh timer
-            if hasattr(self, '_refresh_timer'):
-                self._refresh_timer.stop()
+            progress_dialog.close()
+
+            # Check if cancelled
+            if self._load_thread.cancel_requested:
+                QMessageBox.information(self, "Load Cancelled", "Image loading was cancelled by user.")
+                self.status_bar.showMessage("Image loading cancelled", 5000)
+
+                # Refresh data to show any partial changes
+                try:
+                    self.data_browser.reload_data()
+                    self.update_db_status()
+                except Exception:
+                    pass
+                return
 
             # Final refresh
             try:
@@ -854,38 +1089,56 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            # Show completion message in status bar
+            # Show completion dialog
             added = result.get('added', 0)
             skipped = result.get('skipped', 0)
+
+            total_time = time.time() - start_time
+            time_str = format_time(total_time)
+
+            # Create detailed completion message
+            message = "LOAD NEW IMAGES COMPLETE\n"
+            message += "="*50 + "\n\n"
+            message += "Results:\n"
+            message += f"  • Added: {added} new images with analysis\n"
+            message += f"  • Skipped: {skipped} images already in database\n\n"
+            message += f"Total time: {time_str}\n\n"
+            message += "New images have been analyzed and added to the database.\n"
+            message += "Click OK to continue."
+
+            # Show modal dialog that requires user to click OK
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setWindowTitle("Load New Images Complete")
+            msg_box.setText(message)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+
+            # Update status bar
             self.status_bar.showMessage(
-                f"✓ Load complete! Added {added} images, skipped {skipped} existing",
+                f"✓ Load complete! Added {added} images, skipped {skipped}",
                 10000
             )
 
         def on_error(error_msg):
-            # Stop refresh timer
-            if hasattr(self, '_refresh_timer'):
-                self._refresh_timer.stop()
+            progress_dialog.close()
 
             # Show error in status bar
-            self.status_bar.showMessage(f"✗ Error: {error_msg}", 10000)
+            self.status_bar.showMessage(f"✗ Load error", 10000)
 
-            # Also show error dialog
-            QMessageBox.critical(self, "Load Failed", f"Failed to load images:\n{error_msg}")
+            # Show error dialog
+            QMessageBox.critical(self, "Load Failed", f"Failed to load images:\n\n{error_msg}")
 
         self._load_thread.progress.connect(on_progress)
         self._load_thread.finished_signal.connect(on_finished)
         self._load_thread.error.connect(on_error)
 
-        # Start refresh timer (refresh every 2 seconds)
-        self._refresh_timer.start(2000)
-
-        # Start loading in background
+        # Start loading thread
         self._load_thread.start()
 
-        # Show initial status
-        limit_msg = f" (limited to {limit})" if limit else ""
-        self.status_bar.showMessage(f"Loading new images{limit_msg}...", 3000)
+        # Show progress dialog (blocking)
+        progress_dialog.show()
 
     def _refresh_during_load(self):
         """Refresh data browser during background loading"""
@@ -1025,6 +1278,20 @@ Database Location:
         progress_dialog.setAutoReset(False)
         progress_dialog.setMinimumDuration(0)  # Show immediately
         progress_dialog.setValue(0)
+        progress_dialog.setFixedWidth(450)
+
+        # Center the cancel button using stylesheet
+        progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                min-width: 450px;
+            }
+            QDialogButtonBox {
+                button-layout: 3;  /* Center layout */
+            }
+            QPushButton {
+                min-width: 100px;
+            }
+        """)
 
         # Track timing for ETA
         start_time = time.time()
@@ -1052,9 +1319,14 @@ Database Location:
                 self._rescan_thread.cancel_requested = True
                 return
 
-            # Parse progress message
-            # Format: "Database Check: Image 1/1456 - ..." or "Scanning Files: Image 1/250 - ..."
-            match = re.match(r'(Database Check|Scanning Files): Image (\d+)/(\d+)', message)
+            # Parse progress message - handle multiple formats
+            # Format 1: "Database Check: Image 1/1456 - ..."
+            # Format 2: "Scanning Files: Checking 1/250 - filename"
+            # Format 3: "Scanning Files: Skipped 1/250 - filename"
+            # Format 4: "Building file list: ..."
+
+            # Try to match phase and progress numbers
+            match = re.match(r'(Database Check|Scanning Files):\s+(?:Image|Checking|Skipped)?\s*(\d+)/(\d+)', message)
 
             if match:
                 phase = match.group(1)
@@ -1078,15 +1350,27 @@ Database Location:
                     eta_seconds = time_per_item * remaining_items
                     eta_str = format_time(eta_seconds)
 
-                    # Update dialog label with phase, progress, and ETA
-                    label_text = f"{phase}\n{current}/{total} images\nEstimated time remaining: {eta_str}"
+                    # Extract additional info from message (filename, camera, etc.)
+                    # Show it in a shorter format
+                    detail = message.split(' - ', 1)[1] if ' - ' in message else ''
+                    if len(detail) > 60:
+                        detail = detail[:57] + '...'
+
+                    # Update dialog label with phase, progress, ETA, and detail
+                    label_text = f"{phase}\n"
+                    label_text += f"Progress: {current}/{total} ({progress_pct}%)\n"
+                    label_text += f"Time remaining: {eta_str}\n"
+                    if detail:
+                        label_text += f"\n{detail}"
                 else:
                     label_text = f"{phase}\n{current}/{total} images"
 
                 progress_dialog.setLabelText(label_text)
             else:
-                # Fallback for messages without counts
+                # Handle special status messages (building file list, etc.)
                 progress_dialog.setLabelText(message)
+                # Don't update progress bar for these messages
+                # Keep showing previous progress
 
         def on_finished(result):
             progress_dialog.close()
@@ -1120,14 +1404,26 @@ Database Location:
             total_time = time.time() - start_time
             time_str = format_time(total_time)
 
-            message = f"Database rescan complete!\n\n"
-            message += f"• Removed: {removed} missing images\n"
-            message += f"• Re-analyzed: {reanalyzed} existing images\n"
-            message += f"• Added: {added} new images\n"
-            message += f"• Skipped: {skipped} existing images\n\n"
-            message += f"Total time: {time_str}"
+            # Create detailed completion message
+            message = "DATABASE RESCAN COMPLETE\n"
+            message += "="*50 + "\n\n"
+            message += "Results:\n"
+            message += f"  • Removed: {removed} missing images\n"
+            message += f"  • Re-analyzed: {reanalyzed} existing images (updated EV, noise stats)\n"
+            message += f"  • Added: {added} new images\n"
+            message += f"  • Skipped: {skipped} images already in database\n\n"
+            message += f"Total time: {time_str}\n\n"
+            message += "The database has been updated successfully.\n"
+            message += "Click OK to continue."
 
-            QMessageBox.information(self, "Rescan Complete", message)
+            # Show modal dialog that requires user to click OK
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setWindowTitle("Database Rescan Complete")
+            msg_box.setText(message)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
 
             # Update status bar
             self.status_bar.showMessage(

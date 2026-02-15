@@ -27,7 +27,8 @@ class DataModel:
         if not data_list:
             # Create empty DataFrame with expected columns
             self.full_data = pd.DataFrame(columns=[
-                'camera', 'iso', 'exposure_time', 'ev', 'source', 'filename',
+                'camera', 'iso', 'exposure_time', 'exposure_setting', 'ev',
+                'noise_std', 'noise_mean', 'source', 'filename',
                 'xdim', 'ydim', 'megapixels', 'bits_per_sample',
                 'black_level', 'white_level'
             ])

@@ -404,6 +404,8 @@ class DatabaseManager:
                     e.exposure_time,
                     e.exposure_setting,
                     a.ev,
+                    a.noise_std,
+                    a.noise_mean,
                     i.file_path as source,
                     i.filename,
                     i.xdim,

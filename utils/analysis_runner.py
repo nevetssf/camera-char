@@ -464,7 +464,7 @@ class AnalysisRunner:
 
         return {'added': images_added, 'skipped': images_skipped}
 
-    def load_new_images(self, progress_callback=None, limit=None) -> Dict[str, int]:
+    def load_new_images(self, progress_callback=None, limit=None, cancel_flag=None) -> Dict[str, int]:
         """
         Load new images with full analysis (checksum-based duplicate detection + analysis).
 
@@ -474,6 +474,7 @@ class AnalysisRunner:
         Args:
             progress_callback: Optional callback for progress updates
             limit: Optional limit on number of images to process
+            cancel_flag: Optional callable that returns True if cancellation is requested
 
         Returns:
             Dictionary with 'added' and 'skipped' counts
@@ -490,13 +491,21 @@ class AnalysisRunner:
         images_skipped = 0
 
         if progress_callback:
-            progress_callback("Scanning for new images...")
+            progress_callback("Building file list: Searching source directory for DNG and ERF files...")
 
-        # Find all DNG and ERF files recursively
+        # Find all DNG and ERF files recursively (this can take time for large directories)
         image_extensions = ['.dng', '.DNG', '.erf', '.ERF']
         image_files = []
         for ext in image_extensions:
+            if progress_callback:
+                progress_callback(f"Building file list: Searching for *{ext} files...")
             image_files.extend(source_dir.rglob(f'*{ext}'))
+
+        # Check for cancellation after file list is built
+        if cancel_flag and cancel_flag():
+            if progress_callback:
+                progress_callback("Load cancelled by user")
+            return {'added': images_added, 'skipped': images_skipped}
 
         # Apply limit if specified
         if limit:
@@ -504,9 +513,10 @@ class AnalysisRunner:
 
         total_files = len(image_files)
         if progress_callback:
-            msg = f"Found {total_files} image files"
+            msg = f"File list complete: Found {total_files} image files"
             if limit:
                 msg += f" (limited to {limit})"
+            msg += ". Starting analysis..."
             progress_callback(msg)
 
         # Calculate padding width for numbers
@@ -514,19 +524,18 @@ class AnalysisRunner:
 
         # Process each image file
         for idx, file_path in enumerate(image_files):
+            # Check for cancellation
+            if cancel_flag and cancel_flag():
+                if progress_callback:
+                    progress_callback("Load cancelled by user")
+                return {'added': images_added, 'skipped': images_skipped}
+
             current = idx + 1
             remaining = total_files - idx
 
-            # Get relative path from source directory
-            try:
-                relative_path = file_path.relative_to(source_dir)
-            except ValueError:
-                # Fallback to filename if relative_to fails
-                relative_path = file_path.name
-
-            # Show progress every 10 files
-            if progress_callback and idx % 10 == 0:
-                progress_callback(f"Checking [{current:>{num_width}}/{total_files}] {relative_path}")
+            # Show which file we're checking
+            if progress_callback:
+                progress_callback(f"Loading: Checking {current}/{total_files} - {file_path.name}")
 
             try:
                 # Calculate file hash
@@ -536,11 +545,13 @@ class AnalysisRunner:
                 existing = db.get_image_by_hash(file_hash)
                 if existing:
                     images_skipped += 1
+                    if progress_callback:
+                        progress_callback(f"Loading: Skipped {current}/{total_files} - {file_path.name} (already in database)")
                     continue
 
                 # New image - analyze it
                 if progress_callback:
-                    progress_callback(f"Analyzing [{current:>{num_width}}/{total_files}] {relative_path}")
+                    progress_callback(f"Loading: Analyzing {current}/{total_files} - {file_path.name}")
 
                 # Get EXIF data
                 with exiftool.ExifToolHelper() as et:
@@ -564,24 +575,38 @@ class AnalysisRunner:
                 noise_std = float(np.std(image))
                 noise_mean = float(np.mean(image))
 
-                # Get black and white levels
-                black_level = exif_data.get('SubIFD:BlackLevel')
-                if black_level is None:
-                    black_level = exif_data.get('EXIF:BlackLevel')
-                if black_level is None:
-                    black_level = raw.black_level_per_channel[0]
-                elif isinstance(black_level, str):
-                    black_level = int(black_level.split()[0])
+                # Get black and white levels from raw file first, then EXIF as fallback
+                # Try to get from raw file (most accurate)
+                try:
+                    black_level = raw.black_level_per_channel[0] if hasattr(raw, 'black_level_per_channel') else None
+                except:
+                    black_level = None
 
-                white_level = exif_data.get('SubIFD:WhiteLevel')
+                try:
+                    white_level = raw.camera_whitelevel_per_channel[0] if hasattr(raw, 'camera_whitelevel_per_channel') else None
+                except:
+                    white_level = None
+
+                # Fallback to EXIF if not available in raw
+                if black_level is None:
+                    black_level = exif_data.get('SubIFD:BlackLevel')
+                    if black_level is None:
+                        black_level = exif_data.get('EXIF:BlackLevel')
+                    if black_level is None:
+                        black_level = 0
+                    elif isinstance(black_level, str):
+                        black_level = int(black_level.split()[0])
+
                 if white_level is None:
-                    # Try to calculate from BitsPerSample
-                    bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
-                    if bits_per_sample is not None:
-                        white_level = 2 ** int(bits_per_sample) - 1
-                    else:
-                        # Set to NaN to track missing data
-                        white_level = np.nan
+                    white_level = exif_data.get('SubIFD:WhiteLevel')
+                    if white_level is None:
+                        # Last resort: calculate from BitsPerSample
+                        bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                        if bits_per_sample is not None:
+                            white_level = 2 ** int(bits_per_sample) - 1
+                        else:
+                            # Set to NaN to track missing data
+                            white_level = np.nan
 
                 # Calculate EV: log2((white_level - black_level) / std)
                 if not np.isnan(white_level) and noise_std > 0:
@@ -760,21 +785,34 @@ class AnalysisRunner:
                     noise_std = float(np.std(image))
                     noise_mean = float(np.mean(image))
 
-                    # Get black and white levels
-                    black_level = exif_data.get('SubIFD:BlackLevel')
-                    white_level = exif_data.get('SubIFD:WhiteLevel')
+                    # Get black and white levels from raw file first, then EXIF as fallback
+                    # Try to get from raw file (most accurate)
+                    try:
+                        black_level = raw.black_level_per_channel[0] if hasattr(raw, 'black_level_per_channel') else None
+                    except:
+                        black_level = None
 
-                    # Set defaults if not found
+                    try:
+                        white_level = raw.camera_whitelevel_per_channel[0] if hasattr(raw, 'camera_whitelevel_per_channel') else None
+                    except:
+                        white_level = None
+
+                    # Fallback to EXIF if not available in raw
                     if black_level is None:
-                        black_level = 0
+                        black_level = exif_data.get('SubIFD:BlackLevel')
+                        if black_level is None:
+                            black_level = 0
+
                     if white_level is None:
-                        # Try to calculate from BitsPerSample
-                        bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
-                        if bits_per_sample is not None:
-                            white_level = 2 ** int(bits_per_sample) - 1
-                        else:
-                            # Set to NaN to track missing data
-                            white_level = np.nan
+                        white_level = exif_data.get('SubIFD:WhiteLevel')
+                        if white_level is None:
+                            # Last resort: calculate from BitsPerSample
+                            bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                            if bits_per_sample is not None:
+                                white_level = 2 ** int(bits_per_sample) - 1
+                            else:
+                                # Set to NaN to track missing data
+                                white_level = np.nan
 
                     # Calculate EV: log2((white_level - black_level) / std)
                     if noise_std > 0 and not np.isnan(white_level):
@@ -800,17 +838,25 @@ class AnalysisRunner:
 
         # Step 2: Scan for new images
         if progress_callback:
-            progress_callback("Scanning for new images...")
+            progress_callback("Building file list: Searching source directory for DNG and ERF files...")
 
-        # Find all DNG and ERF files recursively
+        # Find all DNG and ERF files recursively (this can take time for large directories)
         image_extensions = ['.dng', '.DNG', '.erf', '.ERF']
         image_files = []
         for ext in image_extensions:
+            if progress_callback:
+                progress_callback(f"Building file list: Searching for *{ext} files...")
             image_files.extend(source_dir.rglob(f'*{ext}'))
 
         total_files = len(image_files)
         if progress_callback:
-            progress_callback(f"Found {total_files} image files in source directory")
+            progress_callback(f"File list complete: Found {total_files} image files. Starting analysis...")
+
+        # Check for cancellation before processing
+        if cancel_flag and cancel_flag():
+            if progress_callback:
+                progress_callback("Rescan cancelled by user")
+            return {'removed': images_removed, 'reanalyzed': images_reanalyzed, 'added': images_added, 'skipped': images_skipped}
 
         # Calculate padding width for numbers
         num_width = len(str(total_files))
@@ -826,6 +872,10 @@ class AnalysisRunner:
             current = idx + 1
 
             try:
+                # Show which file we're checking
+                if progress_callback:
+                    progress_callback(f"Scanning Files: Checking {current}/{total_files} - {file_path.name}")
+
                 # Calculate file hash
                 file_hash = db.calculate_file_hash(file_path)
 
@@ -833,6 +883,8 @@ class AnalysisRunner:
                 existing = db.get_image_by_hash(file_hash)
                 if existing:
                     images_skipped += 1
+                    if progress_callback:
+                        progress_callback(f"Scanning Files: Skipped {current}/{total_files} - {file_path.name} (already in database)")
                     continue
 
                 # New image - get EXIF data for status message
@@ -870,21 +922,34 @@ class AnalysisRunner:
                 noise_std = float(np.std(image))
                 noise_mean = float(np.mean(image))
 
-                # Get black and white levels
-                black_level = exif_data.get('SubIFD:BlackLevel')
-                white_level = exif_data.get('SubIFD:WhiteLevel')
+                # Get black and white levels from raw file first, then EXIF as fallback
+                # Try to get from raw file (most accurate)
+                try:
+                    black_level = raw.black_level_per_channel[0] if hasattr(raw, 'black_level_per_channel') else None
+                except:
+                    black_level = None
 
-                # Set defaults if not found
+                try:
+                    white_level = raw.camera_whitelevel_per_channel[0] if hasattr(raw, 'camera_whitelevel_per_channel') else None
+                except:
+                    white_level = None
+
+                # Fallback to EXIF if not available in raw
                 if black_level is None:
-                    black_level = 0
+                    black_level = exif_data.get('SubIFD:BlackLevel')
+                    if black_level is None:
+                        black_level = 0
+
                 if white_level is None:
-                    # Try to calculate from BitsPerSample
-                    bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
-                    if bits_per_sample is not None:
-                        white_level = 2 ** int(bits_per_sample) - 1
-                    else:
-                        # Set to NaN to track missing data
-                        white_level = np.nan
+                    white_level = exif_data.get('SubIFD:WhiteLevel')
+                    if white_level is None:
+                        # Last resort: calculate from BitsPerSample
+                        bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                        if bits_per_sample is not None:
+                            white_level = 2 ** int(bits_per_sample) - 1
+                        else:
+                            # Set to NaN to track missing data
+                            white_level = np.nan
 
                 # Calculate EV: log2((white_level - black_level) / std)
                 if noise_std > 0 and not np.isnan(white_level):

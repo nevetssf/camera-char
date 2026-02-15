@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
     def _update_window_title(self) -> None:
         """Update window title to show version and working directory"""
         from utils.config_manager import get_config
+        from pathlib import Path
         config = get_config()
         working_dir = config.get_working_dir()
 
@@ -57,7 +58,16 @@ class MainWindow(QMainWindow):
         if self.version:
             title = f"{title} {self.version}"
         title = f"{title} - {working_dir}"
+
+        # Set window title with path
         self.setWindowTitle(title)
+
+        # Set window file path for macOS proxy icon (clickable path in title bar)
+        # This enables clicking on the title to show path hierarchy dropdown
+        # and opening directories in Finder
+        working_path = Path(working_dir)
+        if working_path.exists():
+            self.setWindowFilePath(str(working_path))
 
     def _create_actions(self) -> None:
         """Create menu and toolbar actions"""
@@ -125,15 +135,15 @@ class MainWindow(QMainWindow):
         self.action_run_analysis.setStatusTip("Analyze raw images and save to database")
         self.action_run_analysis.triggered.connect(self._on_run_analysis)
 
-        self.action_limit_100 = QAction("Limit to 100 Images (Testing)", self)
+        self.action_limit_100 = QAction("Limit to 20 Images (Testing)", self)
         self.action_limit_100.setCheckable(True)
-        self.action_limit_100.setChecked(False)  # Unchecked by default
-        self.action_limit_100.setStatusTip("Limit scans and analysis to 100 images for testing")
+        self.action_limit_100.setChecked(True)  # Checked by default for testing
+        self.action_limit_100.setStatusTip("Limit scans and analysis to 20 images for testing")
         # No connection needed - just checked when running operations
 
         # Database menu actions
-        self.action_load_new = QAction("Load New...", self)
-        self.action_load_new.setStatusTip("Load new images and analyze (skips existing by checksum)")
+        self.action_load_new = QAction("Load New Images", self)
+        self.action_load_new.setStatusTip("Scan for and load new images with EXIF data and calculations (skips existing by checksum)")
         self.action_load_new.triggered.connect(self._on_load_new)
 
         self.action_db_stats = QAction("View Database Statistics", self)
@@ -144,8 +154,12 @@ class MainWindow(QMainWindow):
         self.action_db_export.setStatusTip("Export database to CSV file")
         self.action_db_export.triggered.connect(self._on_db_export)
 
-        self.action_db_rescan = QAction("Rescan...", self)
-        self.action_db_rescan.setStatusTip("Rescan database: remove missing images, re-analyze existing, add new images")
+        self.action_db_reload = QAction("Reload Images in dB", self)
+        self.action_db_reload.setStatusTip("Remove missing images and re-analyze existing images (no new images added)")
+        self.action_db_reload.triggered.connect(self._on_db_reload)
+
+        self.action_db_rescan = QAction("Reload and Load New", self)
+        self.action_db_rescan.setStatusTip("Remove missing images, re-analyze existing, and add new images")
         self.action_db_rescan.triggered.connect(self._on_db_rescan)
 
         self.action_refresh = QAction("Refresh", self)
@@ -186,13 +200,14 @@ class MainWindow(QMainWindow):
         # Database menu
         database_menu = menubar.addMenu("Database")
         database_menu.addAction(self.action_load_new)
-        database_menu.addAction(self.action_change_source)
+        database_menu.addAction(self.action_db_reload)
+        database_menu.addAction(self.action_db_rescan)
         database_menu.addSeparator()
         database_menu.addAction(self.action_limit_100)
         database_menu.addSeparator()
         database_menu.addAction(self.action_db_stats)
         database_menu.addAction(self.action_db_export)
-        database_menu.addAction(self.action_db_rescan)
+        database_menu.addAction(self.action_change_source)
         database_menu.addSeparator()
         database_menu.addAction(self.action_db_clear)
 
@@ -276,6 +291,9 @@ class MainWindow(QMainWindow):
         """Connect signals between components"""
         # When row is selected in data browser, load image
         self.data_browser.row_selected.connect(self._on_row_selected)
+
+        # When data browser emits status message, show in status bar
+        self.data_browser.status_message.connect(self.status_bar.showMessage)
 
         # When plot viewer camera selection changes, update data browser
         # (This could be implemented for bidirectional filtering)
@@ -645,7 +663,7 @@ class MainWindow(QMainWindow):
                 return
 
         # Check if limit is enabled
-        limit = 100 if self.action_limit_100.isChecked() else None
+        limit = 20 if self.action_limit_100.isChecked() else None
 
         # Create progress dialog
         dialog = QDialog(self)
@@ -751,7 +769,7 @@ class MainWindow(QMainWindow):
         from utils.analysis_runner import AnalysisRunner
 
         # Check if limit is enabled
-        limit = 100 if self.action_limit_100.isChecked() else None
+        limit = 20 if self.action_limit_100.isChecked() else None
 
         # Create progress dialog
         dialog = QDialog(self)
@@ -844,7 +862,7 @@ class MainWindow(QMainWindow):
         from utils.analysis_runner import AnalysisRunner
 
         # Check if limit is enabled
-        limit = 100 if self.action_limit_100.isChecked() else None
+        limit = 20 if self.action_limit_100.isChecked() else None
 
         # Create progress dialog
         dialog = QDialog(self)
@@ -937,10 +955,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_load_new(self) -> None:
-        """Handle load new images with analysis action with blocking progress dialog"""
+        """Handle load new images with analysis action with custom progress dialog"""
         from PyQt6.QtCore import QThread, pyqtSignal
-        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from PyQt6.QtWidgets import QMessageBox
         from utils.analysis_runner import AnalysisRunner
+        from views.progress_dialog import ProgressDialog
         import re
         import time
 
@@ -950,7 +969,7 @@ class MainWindow(QMainWindow):
             return
 
         # Check if limit is enabled
-        limit = 100 if self.action_limit_100.isChecked() else None
+        limit = 20 if self.action_limit_100.isChecked() else None
 
         # Thread for loading
         class LoadThread(QThread):
@@ -978,29 +997,8 @@ class MainWindow(QMainWindow):
 
         self._load_thread = LoadThread(limit)
 
-        # Create blocking progress dialog
-        limit_msg = f" (limited to {limit})" if limit else ""
-        progress_dialog = QProgressDialog(f"Preparing to load new images{limit_msg}...", "Cancel", 0, 100, self)
-        progress_dialog.setWindowTitle("Load New Images")
-        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        progress_dialog.setAutoClose(False)
-        progress_dialog.setAutoReset(False)
-        progress_dialog.setMinimumDuration(0)  # Show immediately
-        progress_dialog.setValue(0)
-        progress_dialog.setFixedWidth(450)
-
-        # Center the cancel button using stylesheet
-        progress_dialog.setStyleSheet("""
-            QProgressDialog {
-                min-width: 450px;
-            }
-            QDialogButtonBox {
-                button-layout: 3;  /* Center layout */
-            }
-            QPushButton {
-                min-width: 100px;
-            }
-        """)
+        # Create custom progress dialog
+        progress_dialog = ProgressDialog("Load New Images", self)
 
         # Track timing for ETA
         start_time = time.time()
@@ -1022,14 +1020,9 @@ class MainWindow(QMainWindow):
         def on_progress(message):
             nonlocal phase_start_time
 
-            # Check if dialog was cancelled
-            if progress_dialog.wasCanceled():
-                self._load_thread.cancel_requested = True
-                return
-
             # Parse progress message
-            # Format: "Loading: Image 1/250 - filename" or "Building file list: ..."
-            match = re.match(r'(?:Loading|Scanning):\s+(?:Image|Checking)?\s*(\d+)/(\d+)', message)
+            # Format: "Loading: Checking 1/250 - filename"
+            match = re.match(r'(?:Loading|Scanning):\s+(?:Image|Checking|Updating|Analyzing|Skipped)?\s*(\d+)/(\d+)', message)
 
             if match:
                 current = int(match.group(1))
@@ -1037,7 +1030,6 @@ class MainWindow(QMainWindow):
 
                 # Calculate progress percentage
                 progress_pct = int((current / total) * 100)
-                progress_dialog.setValue(progress_pct)
 
                 # Calculate ETA
                 elapsed = time.time() - phase_start_time
@@ -1047,24 +1039,31 @@ class MainWindow(QMainWindow):
                     eta_seconds = time_per_item * remaining_items
                     eta_str = format_time(eta_seconds)
 
-                    # Extract additional info from message (filename, camera, etc.)
-                    detail = message.split(' - ', 1)[1] if ' - ' in message else ''
-                    if len(detail) > 60:
-                        detail = detail[:57] + '...'
-
-                    # Update dialog label with progress, ETA, and detail
-                    label_text = f"Loading New Images\n"
-                    label_text += f"Progress: {current}/{total} ({progress_pct}%)\n"
-                    label_text += f"Time remaining: {eta_str}\n"
-                    if detail:
-                        label_text += f"\n{detail}"
+                    # Update progress text
+                    progress_text = f"Processing: {current}/{total} ({progress_pct}%)\nTime remaining: {eta_str}"
                 else:
-                    label_text = f"Loading New Images\n{current}/{total} images"
+                    progress_text = f"Processing: {current}/{total} ({progress_pct}%)"
 
-                progress_dialog.setLabelText(label_text)
+                progress_dialog.set_progress(progress_text)
+
+                # Extract filename and details for status
+                if ' - ' in message:
+                    file_info = message.split(' - ', 1)[1]
+                    # Check if additional details are included (format: "filename|ISO|exposure|MP")
+                    if '|' in file_info:
+                        parts = file_info.split('|')
+                        filename = parts[0]
+                        details = ' | '.join(parts[1:])  # ISO, exposure, MP
+                        progress_dialog.set_status(f"{filename}\n{details}")
+                    else:
+                        progress_dialog.set_status(file_info)
             else:
                 # Handle special status messages (building file list, etc.)
-                progress_dialog.setLabelText(message)
+                progress_dialog.set_progress(message)
+                progress_dialog.set_status("")
+
+        # Connect cancel signal
+        progress_dialog.cancel_requested.connect(lambda: setattr(self._load_thread, 'cancel_requested', True))
 
         def on_finished(result):
             progress_dialog.close()
@@ -1101,9 +1100,9 @@ class MainWindow(QMainWindow):
             message += "="*50 + "\n\n"
             message += "Results:\n"
             message += f"  • Added: {added} new images with analysis\n"
-            message += f"  • Skipped: {skipped} images already in database\n\n"
+            message += f"  • Skipped: {skipped} existing images (already in database)\n\n"
             message += f"Total time: {time_str}\n\n"
-            message += "New images have been analyzed and added to the database.\n"
+            message += "Images have been analyzed and database updated.\n"
             message += "Click OK to continue."
 
             # Show modal dialog that requires user to click OK
@@ -1137,8 +1136,8 @@ class MainWindow(QMainWindow):
         # Start loading thread
         self._load_thread.start()
 
-        # Show progress dialog (blocking)
-        progress_dialog.show()
+        # Show progress dialog (modal/blocking)
+        progress_dialog.exec()
 
     def _refresh_during_load(self):
         """Refresh data browser during background loading"""
@@ -1215,6 +1214,213 @@ Database Location:
                 f"Failed to export database:\n{str(e)}"
             )
 
+    def _on_db_reload(self) -> None:
+        """Handle database reload action (Phase 1 and 2 only) with blocking progress dialog"""
+        from PyQt6.QtCore import QThread, pyqtSignal, QTimer
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from utils.analysis_runner import AnalysisRunner
+        import re
+        import time
+
+        # Check if already running
+        if hasattr(self, '_reload_thread') and self._reload_thread and self._reload_thread.isRunning():
+            QMessageBox.warning(self, "Reload in Progress", "Reload Images in dB is already in progress.")
+            return
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            "Reload Images in dB",
+            "This will:\n\n"
+            "• Check all database images and remove missing files\n"
+            "• Re-analyze existing images (recalculate noise statistics and refresh EXIF data)\n\n"
+            "This will NOT scan for or add new images.\n\n"
+            "This may take a while depending on the number of images.\n\n"
+            "Do you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Thread for reloading
+        class ReloadThread(QThread):
+            progress = pyqtSignal(str)
+            finished_signal = pyqtSignal(dict)
+            error = pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.cancel_requested = False
+
+            def run(self):
+                try:
+                    runner = AnalysisRunner()
+                    result = runner.rescan_database(
+                        progress_callback=lambda msg: self.progress.emit(msg),
+                        reanalyze_existing=True,
+                        add_new_images=False,  # Only Phase 1 and 2
+                        cancel_flag=lambda: self.cancel_requested
+                    )
+                    self.finished_signal.emit(result)
+                except Exception as e:
+                    import traceback
+                    self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
+
+        self._reload_thread = ReloadThread()
+
+        # Create custom progress dialog
+        from views.progress_dialog import ProgressDialog
+        progress_dialog = ProgressDialog("Reload Images in dB", self)
+
+        # Connect cancel button
+        progress_dialog.cancel_requested.connect(lambda: setattr(self._reload_thread, 'cancel_requested', True))
+
+        # Track timing for ETA
+        start_time = time.time()
+        current_phase = None
+        phase_start_time = start_time
+
+        def format_time(seconds):
+            """Format seconds into human-readable time"""
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                mins = int(seconds / 60)
+                secs = int(seconds % 60)
+                return f"{mins}m {secs}s"
+            else:
+                hours = int(seconds / 3600)
+                mins = int((seconds % 3600) / 60)
+                return f"{hours}h {mins}m"
+
+        def on_progress(message):
+            nonlocal current_phase, phase_start_time
+
+            # Check if dialog was cancelled
+            if progress_dialog.was_cancelled():
+                self._reload_thread.cancel_requested = True
+                return
+
+            # Parse progress message - handle multiple formats
+            # Format 1: "Database Check: Image 1/1456 - ..."
+            # Format 2: "Scanning Files: Checking 1/250 - filename"
+
+            # Try to match phase and progress numbers
+            match = re.match(r'(Database Check|Scanning Files):\s+(?:Image|Checking)?\s*(\d+)/(\d+)', message)
+
+            if match:
+                phase = match.group(1)
+                current = int(match.group(2))
+                total = int(match.group(3))
+
+                # Check if phase changed
+                if phase != current_phase:
+                    current_phase = phase
+                    phase_start_time = time.time()
+
+                # Calculate progress percentage
+                progress_pct = int((current / total) * 100)
+
+                # Calculate ETA
+                elapsed = time.time() - phase_start_time
+                if current > 0 and elapsed > 0:
+                    time_per_item = elapsed / current
+                    remaining_items = total - current
+                    eta_seconds = time_per_item * remaining_items
+                    eta_str = format_time(eta_seconds)
+
+                    # Update main progress text
+                    progress_text = f"{phase}: {current}/{total} ({progress_pct}%) - ETA: {eta_str}"
+                    progress_dialog.set_progress(progress_text)
+
+                    # Extract filename for status
+                    if ' - ' in message:
+                        filename = message.split(' - ', 1)[1]
+                        progress_dialog.set_status(filename)
+                else:
+                    progress_text = f"{phase}: {current}/{total} ({progress_pct}%)"
+                    progress_dialog.set_progress(progress_text)
+            else:
+                # Handle special status messages
+                progress_dialog.set_progress(message)
+                progress_dialog.set_status("")
+
+        def on_finished(result):
+            progress_dialog.close()
+
+            # Check if cancelled
+            if self._reload_thread.cancel_requested:
+                QMessageBox.information(self, "Reload Cancelled", "Reload Images in dB was cancelled by user.")
+                self.status_bar.showMessage("Reload Images in dB cancelled", 5000)
+
+                # Refresh data to show any partial changes
+                try:
+                    self.data_browser.reload_data()
+                    self.update_db_status()
+                except Exception:
+                    pass
+                return
+
+            # Final refresh
+            try:
+                self.data_browser.reload_data()
+                self.update_db_status()
+            except Exception:
+                pass
+
+            # Show completion dialog
+            removed = result.get('removed', 0)
+            reanalyzed = result.get('reanalyzed', 0)
+
+            total_time = time.time() - start_time
+            time_str = format_time(total_time)
+
+            # Create detailed completion message
+            message = "RELOAD IMAGES IN DB COMPLETE\n"
+            message += "="*50 + "\n\n"
+            message += "Results:\n"
+            message += f"  • Removed: {removed} missing images\n"
+            message += f"  • Re-analyzed: {reanalyzed} existing images (updated EV, noise stats, EXIF data)\n\n"
+            message += f"Total time: {time_str}\n\n"
+            message += "The database has been updated successfully.\n"
+            message += "Click OK to continue."
+
+            # Show modal dialog that requires user to click OK
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setWindowTitle("Reload Images in dB Complete")
+            msg_box.setText(message)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+
+            # Update status bar
+            self.status_bar.showMessage(
+                f"✓ Reload complete! Removed {removed}, re-analyzed {reanalyzed}",
+                10000
+            )
+
+        def on_error(error_msg):
+            progress_dialog.close()
+
+            # Show error in status bar
+            self.status_bar.showMessage(f"✗ Reload error", 10000)
+
+            # Show error dialog
+            QMessageBox.critical(self, "Reload Failed", f"Failed to reload images in dB:\n\n{error_msg}")
+
+        self._reload_thread.progress.connect(on_progress)
+        self._reload_thread.finished_signal.connect(on_finished)
+        self._reload_thread.error.connect(on_error)
+
+        # Start reload thread
+        self._reload_thread.start()
+
+        # Show progress dialog (blocking)
+        progress_dialog.exec()
+
     def _on_db_rescan(self) -> None:
         """Handle database rescan action with blocking progress dialog"""
         from PyQt6.QtCore import QThread, pyqtSignal, QTimer
@@ -1225,13 +1431,13 @@ Database Location:
 
         # Check if already running
         if hasattr(self, '_rescan_thread') and self._rescan_thread and self._rescan_thread.isRunning():
-            QMessageBox.warning(self, "Rescan in Progress", "Database rescan is already in progress.")
+            QMessageBox.warning(self, "Reload in Progress", "Reload and load new is already in progress.")
             return
 
         # Confirm with user
         reply = QMessageBox.question(
             self,
-            "Rescan Database",
+            "Reload and Load New",
             "This will:\n\n"
             "• Check all database images and remove missing files\n"
             "• Re-analyze existing images (recalculate noise statistics)\n"
@@ -1270,28 +1476,12 @@ Database Location:
 
         self._rescan_thread = RescanThread()
 
-        # Create blocking progress dialog
-        progress_dialog = QProgressDialog("Preparing to scan database...", "Cancel", 0, 100, self)
-        progress_dialog.setWindowTitle("Database Rescan")
-        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        progress_dialog.setAutoClose(False)
-        progress_dialog.setAutoReset(False)
-        progress_dialog.setMinimumDuration(0)  # Show immediately
-        progress_dialog.setValue(0)
-        progress_dialog.setFixedWidth(450)
+        # Create custom progress dialog
+        from views.progress_dialog import ProgressDialog
+        progress_dialog = ProgressDialog("Reload and Load New", self)
 
-        # Center the cancel button using stylesheet
-        progress_dialog.setStyleSheet("""
-            QProgressDialog {
-                min-width: 450px;
-            }
-            QDialogButtonBox {
-                button-layout: 3;  /* Center layout */
-            }
-            QPushButton {
-                min-width: 100px;
-            }
-        """)
+        # Connect cancel button
+        progress_dialog.cancel_requested.connect(lambda: setattr(self._rescan_thread, 'cancel_requested', True))
 
         # Track timing for ETA
         start_time = time.time()
@@ -1315,7 +1505,7 @@ Database Location:
             nonlocal current_phase, phase_start_time
 
             # Check if dialog was cancelled
-            if progress_dialog.wasCanceled():
+            if progress_dialog.was_cancelled():
                 self._rescan_thread.cancel_requested = True
                 return
 
@@ -1340,7 +1530,6 @@ Database Location:
 
                 # Calculate progress percentage
                 progress_pct = int((current / total) * 100)
-                progress_dialog.setValue(progress_pct)
 
                 # Calculate ETA
                 elapsed = time.time() - phase_start_time
@@ -1350,25 +1539,21 @@ Database Location:
                     eta_seconds = time_per_item * remaining_items
                     eta_str = format_time(eta_seconds)
 
-                    # Extract additional info from message (filename, camera, etc.)
-                    # Show it in a shorter format
-                    detail = message.split(' - ', 1)[1] if ' - ' in message else ''
-                    if len(detail) > 60:
-                        detail = detail[:57] + '...'
+                    # Update main progress text
+                    progress_text = f"{phase}: {current}/{total} ({progress_pct}%) - ETA: {eta_str}"
+                    progress_dialog.set_progress(progress_text)
 
-                    # Update dialog label with phase, progress, ETA, and detail
-                    label_text = f"{phase}\n"
-                    label_text += f"Progress: {current}/{total} ({progress_pct}%)\n"
-                    label_text += f"Time remaining: {eta_str}\n"
-                    if detail:
-                        label_text += f"\n{detail}"
+                    # Extract filename for status
+                    if ' - ' in message:
+                        filename = message.split(' - ', 1)[1]
+                        progress_dialog.set_status(filename)
                 else:
-                    label_text = f"{phase}\n{current}/{total} images"
-
-                progress_dialog.setLabelText(label_text)
+                    progress_text = f"{phase}: {current}/{total} ({progress_pct}%)"
+                    progress_dialog.set_progress(progress_text)
             else:
                 # Handle special status messages (building file list, etc.)
-                progress_dialog.setLabelText(message)
+                progress_dialog.set_progress(message)
+                progress_dialog.set_status("")
                 # Don't update progress bar for these messages
                 # Keep showing previous progress
 
@@ -1377,8 +1562,8 @@ Database Location:
 
             # Check if cancelled
             if self._rescan_thread.cancel_requested:
-                QMessageBox.information(self, "Rescan Cancelled", "Database rescan was cancelled by user.")
-                self.status_bar.showMessage("Database rescan cancelled", 5000)
+                QMessageBox.information(self, "Reload Cancelled", "Reload and load new was cancelled by user.")
+                self.status_bar.showMessage("Reload and load new cancelled", 5000)
 
                 # Refresh data to show any partial changes
                 try:
@@ -1405,7 +1590,7 @@ Database Location:
             time_str = format_time(total_time)
 
             # Create detailed completion message
-            message = "DATABASE RESCAN COMPLETE\n"
+            message = "RELOAD AND LOAD NEW COMPLETE\n"
             message += "="*50 + "\n\n"
             message += "Results:\n"
             message += f"  • Removed: {removed} missing images\n"
@@ -1419,7 +1604,7 @@ Database Location:
             # Show modal dialog that requires user to click OK
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Icon.Information)
-            msg_box.setWindowTitle("Database Rescan Complete")
+            msg_box.setWindowTitle("Reload and Load New Complete")
             msg_box.setText(message)
             msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
@@ -1427,7 +1612,7 @@ Database Location:
 
             # Update status bar
             self.status_bar.showMessage(
-                f"✓ Rescan complete! Removed {removed}, re-analyzed {reanalyzed}, added {added}",
+                f"✓ Reload complete! Removed {removed}, re-analyzed {reanalyzed}, added {added}",
                 10000
             )
 
@@ -1435,10 +1620,10 @@ Database Location:
             progress_dialog.close()
 
             # Show error in status bar
-            self.status_bar.showMessage(f"✗ Rescan error", 10000)
+            self.status_bar.showMessage(f"✗ Reload error", 10000)
 
             # Show error dialog
-            QMessageBox.critical(self, "Rescan Failed", f"Failed to rescan database:\n\n{error_msg}")
+            QMessageBox.critical(self, "Reload Failed", f"Failed to reload and load new:\n\n{error_msg}")
 
         self._rescan_thread.progress.connect(on_progress)
         self._rescan_thread.finished_signal.connect(on_finished)
@@ -1448,7 +1633,7 @@ Database Location:
         self._rescan_thread.start()
 
         # Show progress dialog (blocking)
-        progress_dialog.show()
+        progress_dialog.exec()
 
     def _on_db_refresh(self) -> None:
         """Handle refresh data from database action"""

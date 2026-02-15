@@ -103,7 +103,12 @@ class DatabaseManager:
             exif_json TEXT NOT NULL,
             iso INTEGER,
             exposure_time REAL,
-            exposure_setting INTEGER,
+            exposure_setting INTEGER GENERATED ALWAYS AS (
+                CASE
+                    WHEN exposure_time > 0 AND exposure_time < 1 THEN CAST(ROUND(1.0 / exposure_time) AS INTEGER)
+                    ELSE NULL
+                END
+            ) STORED,
             black_level TEXT,
             white_level TEXT,
             bits_per_sample INTEGER,
@@ -314,11 +319,6 @@ class DatabaseManager:
         if exposure_time is None:
             exposure_time = exif_dict.get('EXIF:ExposureTime')
 
-        # Calculate exposure setting (1/exposure_time, rounded)
-        exposure_setting = None
-        if exposure_time and exposure_time > 0:
-            exposure_setting = round(1.0 / exposure_time)
-
         # Extract black and white levels if not provided
         if black_level is None:
             black_level = exif_dict.get('SubIFD:BlackLevel')
@@ -352,11 +352,11 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.execute(
                 """INSERT INTO exif_data
-                   (image_id, exif_json, iso, exposure_time, exposure_setting,
+                   (image_id, exif_json, iso, exposure_time,
                     black_level, white_level, bits_per_sample, megapixels,
                     date_taken, orientation, color_space, white_balance)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (image_id, json.dumps(exif_dict), iso, exposure_time, exposure_setting,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (image_id, json.dumps(exif_dict), iso, exposure_time,
                  black_level_json, white_level_json, bits_per_sample, megapixels,
                  date_taken, orientation, color_space, white_balance)
             )
@@ -399,7 +399,12 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.execute(f"""
                 SELECT
-                    c.model as camera,
+                    CASE
+                        WHEN e.megapixels IS NOT NULL THEN
+                            c.model || ' (' || ROUND(e.megapixels, 1) || 'MP)'
+                        ELSE
+                            c.model
+                    END as camera,
                     e.iso,
                     e.exposure_time,
                     e.exposure_setting,
@@ -422,22 +427,6 @@ class DatabaseManager:
                 ORDER BY c.model, e.iso, e.exposure_time
             """)
             return [dict(row) for row in cursor.fetchall()]
-
-    def get_unique_exposure_settings(self) -> List[int]:
-        """
-        Get list of unique exposure settings from database.
-
-        Returns:
-            Sorted list of unique exposure settings
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT DISTINCT exposure_setting
-                FROM exif_data
-                WHERE exposure_setting IS NOT NULL
-                ORDER BY exposure_setting
-            """)
-            return [row[0] for row in cursor.fetchall()]
 
     def mark_archived(self, image_id: int, archived: bool = True) -> None:
         """Mark image as archived"""

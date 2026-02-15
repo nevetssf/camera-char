@@ -215,6 +215,13 @@ class PlotViewer(QWidget):
             camera_data = data[data['camera'] == camera].sort_values('iso')
             color = color_sequence[i % len(color_sequence)]
 
+            # Create custom hover text with formatted values
+            hover_text = []
+            for _, row in camera_data.iterrows():
+                time_val = row.get('exposure_time', row.get('time', 0))
+                shutter_speed = f"1/{int(1/time_val)}s" if time_val > 0 else "N/A"
+                hover_text.append(f"{camera}<br>ISO{int(row['iso'])} | {shutter_speed} | {row['EV']:.1f}eV")
+
             fig.add_trace(go.Scatter(
                 x=camera_data['iso'],
                 y=camera_data['EV'],
@@ -222,7 +229,8 @@ class PlotViewer(QWidget):
                 name=camera,
                 line=dict(color=color, width=2.5),
                 marker=dict(size=8, color=color, line=dict(width=1, color='white')),
-                hovertemplate=f'{camera}: %{{y:.2f}} EV<extra></extra>',
+                text=hover_text,
+                hovertemplate='%{text}<extra></extra>',
             ))
 
         # Update layout with responsive sizing
@@ -263,6 +271,15 @@ class PlotViewer(QWidget):
             camera_data = data[data['camera'] == camera].sort_values('time')
             color = color_sequence[i % len(color_sequence)]
 
+            # Create custom hover text with formatted values
+            hover_text = []
+            for _, row in camera_data.iterrows():
+                time_val = row['time']
+                shutter_speed = f"1/{int(1/time_val)}s" if time_val > 0 else "N/A"
+                iso_val = row.get('iso', 'N/A')
+                iso_str = f"ISO{int(iso_val)}" if iso_val != 'N/A' else "ISO N/A"
+                hover_text.append(f"{camera}<br>{iso_str} | {shutter_speed} | {row['EV']:.1f}eV")
+
             fig.add_trace(go.Scatter(
                 x=camera_data['time'],
                 y=camera_data['EV'],
@@ -270,11 +287,12 @@ class PlotViewer(QWidget):
                 name=camera,
                 line=dict(color=color, width=2.5),
                 marker=dict(size=8, color=color, line=dict(width=1, color='white')),
-                hovertemplate=f'{camera}: %{{y:.2f}} EV<extra></extra>',
+                text=hover_text,
+                hovertemplate='%{text}<extra></extra>',
             ))
 
         # Update layout with responsive sizing
-        fig.update_xaxes(type='log', title='Exposure Time (seconds)')
+        fig.update_xaxes(type='log', title='Exposure Time (seconds)', hoverformat='.6fs')
         fig.update_yaxes(title='Exposure Value (EV)')
         fig.update_layout(
             title=dict(text='EV vs Exposure Time', x=0.5, xanchor='center'),
@@ -326,41 +344,46 @@ class PlotViewer(QWidget):
             group_data = group_data.sort_values(xaxis_param)
 
             # Create hover template
-            # If x-axis is exposure_time and exposure_setting exists, show setting in hover
-            if xaxis_param == 'exposure_time' and 'exposure_setting' in group_data.columns:
-                # Create custom text with exposure settings formatted as fractions
-                hover_text = []
-                for setting, ev, time_val in zip(group_data['exposure_setting'], group_data['EV'], group_data['exposure_time']):
-                    # Format exposure setting as "1/X" fraction
-                    if pd.notna(setting) and setting != '':
-                        # If setting is already a string like "1/4000", use it
-                        if isinstance(setting, str) and '/' in str(setting):
-                            formatted_setting = setting
-                        else:
-                            # Otherwise, calculate from exposure time
-                            if time_val > 0:
-                                denominator = int(1.0 / time_val)
-                                formatted_setting = f"1/{denominator}"
-                            else:
-                                formatted_setting = str(setting)
-                    else:
-                        # Fallback: calculate from exposure time
+            hover_text = []
+
+            # Build hover text for each point
+            for idx, row in group_data.iterrows():
+                lines = []
+
+                # Line 1: Camera name or group value
+                lines.append(str(group_value))
+
+                # Line 2: ISO | exposure | EV value (all on one line)
+                detail_parts = []
+
+                if 'iso' in row and pd.notna(row['iso']):
+                    detail_parts.append(f"ISO{int(row['iso'])}")
+
+                # Add exposure time in shutter speed format
+                if xaxis_param == 'exposure_time' or 'exposure_time' in row:
+                    time_val = row.get('exposure_time', row.get(xaxis_param, 0))
+                    if pd.notna(time_val) and time_val > 0:
+                        shutter_speed = f"1/{int(1/time_val)}s"
+                        detail_parts.append(shutter_speed)
+                elif xaxis_param == 'iso':
+                    # For EV vs ISO plots, show exposure time from data
+                    if 'exposure_time' in row and pd.notna(row['exposure_time']):
+                        time_val = row['exposure_time']
                         if time_val > 0:
-                            denominator = int(1.0 / time_val)
-                            formatted_setting = f"1/{denominator}"
-                        else:
-                            formatted_setting = f"{time_val:.4f}s"
+                            shutter_speed = f"1/{int(1/time_val)}s"
+                            detail_parts.append(shutter_speed)
 
-                    hover_text.append(f'{group_param}: {group_value}<br>Exposure: {formatted_setting}<br>EV: {ev:.2f}')
+                # Add EV value
+                detail_parts.append(f"{row['EV']:.1f}eV")
 
-                hovertemplate = '%{text}<extra></extra>'
-                custom_data = {'text': hover_text}
-            else:
-                # Standard hover template
-                xaxis_display = xaxis_param.replace('_', ' ').title()
-                hover_text = None
-                hovertemplate = f'{group_param}: {group_value}<br>{xaxis_display}: %{{x}}<br>EV: %{{y:.2f}}<extra></extra>'
-                custom_data = {}
+                # Join all details on one line
+                if detail_parts:
+                    lines.append(' | '.join(detail_parts))
+
+                hover_text.append('<br>'.join(lines))
+
+            hovertemplate = '%{text}<extra></extra>'
+            custom_data = {'text': hover_text}
 
             # Create trace for this group
             trace_args = {
@@ -370,13 +393,9 @@ class PlotViewer(QWidget):
                 'name': str(group_value),
                 'marker': dict(size=8),
                 'line': dict(color=colors[color_idx % len(colors)], width=2),
+                'text': hover_text,
                 'hovertemplate': hovertemplate
             }
-
-            # Add custom hover text if using exposure settings
-            if hover_text:
-                trace_args['text'] = hover_text
-                trace_args['hoverinfo'] = 'text'
 
             fig.add_trace(go.Scatter(**trace_args))
 
@@ -407,9 +426,15 @@ class PlotViewer(QWidget):
             margin=dict(l=60, r=150, t=60, b=60),
         )
 
-        # Use log scale if enabled by checkbox
+        # Use log scale if enabled by checkbox and set hoverformat for time axis
         if use_log_scale:
-            fig.update_xaxes(type='log')
+            if xaxis_param == 'exposure_time':
+                fig.update_xaxes(type='log', hoverformat='.6fs')
+            else:
+                fig.update_xaxes(type='log')
+        else:
+            if xaxis_param == 'exposure_time':
+                fig.update_xaxes(hoverformat='.6fs')
 
         return fig
 

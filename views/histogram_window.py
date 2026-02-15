@@ -157,20 +157,20 @@ class HistogramWindow(QDialog):
         self.y_max_slider.blockSignals(True)
 
         # Set up sliders for the new data using original dimensions
-        # Min sliders: 0 to 100
+        # Min sliders: 0 to 120
         self.x_min_slider.setMinimum(0)
-        self.x_min_slider.setMaximum(min(100, slider_width - 1))
+        self.x_min_slider.setMaximum(min(120, slider_width - 1))
 
-        # Max sliders: (length - 100) to length
-        self.x_max_slider.setMinimum(max(0, slider_width - 100))
+        # Max sliders: (length - 120) to length
+        self.x_max_slider.setMinimum(max(0, slider_width - 120))
         self.x_max_slider.setMaximum(slider_width - 1)
 
-        # Min sliders: 0 to 100
+        # Min sliders: 0 to 120
         self.y_min_slider.setMinimum(0)
-        self.y_min_slider.setMaximum(min(100, slider_height - 1))
+        self.y_min_slider.setMaximum(min(120, slider_height - 1))
 
-        # Max sliders: (length - 100) to length
-        self.y_max_slider.setMinimum(max(0, slider_height - 100))
+        # Max sliders: (length - 120) to length
+        self.y_max_slider.setMinimum(max(0, slider_height - 120))
         self.y_max_slider.setMaximum(slider_height - 1)
 
         # Load saved camera attributes if available

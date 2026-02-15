@@ -489,7 +489,7 @@ class Analysis(object):
         
         # Generate title if not provided
         if title is None:
-            shutter_speed = f"1/{int(1/exposure_time)}s" if exposure_time > 0 else "N/A"
+            shutter_speed = f"1/{round(1/exposure_time)}s" if exposure_time > 0 else "N/A"
             title = f'Camera Sensor Dynamic Range vs ISO Sensitivity<br><sub>Measured at {shutter_speed} shutter speed</sub>'
         
         # Calculate EV range if not provided - add 10% padding
@@ -537,10 +537,13 @@ class Analysis(object):
             
             for idx, (camera_name, variant) in enumerate(variants):
                 camera_data = filtered_data[filtered_data['camera'] == camera_name]
-                
+
                 # Use different line styles for variants of the same base model
                 line_style = line_styles[idx % len(line_styles)] if has_multiple_variants else 'solid'
-                
+
+                # Format shutter speed for hover
+                shutter_speed = f"1/{round(1/exposure_time)}s" if exposure_time > 0 else "N/A"
+
                 trace = go.Scatter(
                     x=camera_data['iso'],
                     y=camera_data['EV'],
@@ -550,7 +553,7 @@ class Analysis(object):
                     legendgrouptitle=dict(text=base_model) if has_multiple_variants else None,
                     line=dict(color=base_color, width=2.5, dash=line_style),
                     marker=dict(size=8, color=base_color, line=dict(width=1, color='white')),
-                    hovertemplate=f'{camera_name}: %{{y:.2f}} EV<extra></extra>',
+                    hovertemplate=f'{camera_name}<br>ISO%{{x}} | {shutter_speed} | %{{y:.1f}}eV<extra></extra>',
                     showlegend=True
                 )
                 fig.add_trace(trace)
@@ -706,10 +709,17 @@ class Analysis(object):
             
             for idx, (camera_name, variant) in enumerate(variants):
                 camera_data = filtered_data[filtered_data['camera'] == camera_name].sort_values('time')
-                
+
                 # Use different line styles for variants of the same base model
                 line_style = line_styles[idx % len(line_styles)] if has_multiple_variants else 'solid'
-                
+
+                # Create custom hover text with shutter speed format
+                hover_text = []
+                for _, row in camera_data.iterrows():
+                    time_val = row['time']
+                    shutter_speed = f"1/{int(1/time_val)}s" if time_val > 0 else "N/A"
+                    hover_text.append(f"{camera_name}<br>ISO{iso} | {shutter_speed} | {row['EV']:.1f}eV")
+
                 trace = go.Scatter(
                     x=camera_data['time'],
                     y=camera_data['EV'],
@@ -719,7 +729,8 @@ class Analysis(object):
                     legendgrouptitle=dict(text=base_model) if has_multiple_variants else None,
                     line=dict(color=base_color, width=2.5, dash=line_style),
                     marker=dict(size=8, color=base_color, line=dict(width=1, color='white')),
-                    hovertemplate=f'{camera_name}: %{{y:.2f}} EV<extra></extra>',
+                    text=hover_text,
+                    hovertemplate='%{text}<extra></extra>',
                     showlegend=True
                 )
                 fig.add_trace(trace)
@@ -747,7 +758,7 @@ class Analysis(object):
                 gridcolor='rgba(128,128,128,0.2)',
                 title_font=dict(size=14, color='#2c3e50'),
                 tickfont=dict(size=11),
-                hoverformat='.4f'  # Format time with 4 decimals
+                hoverformat='.6fs'  # Format time with seconds unit (e.g., 0.004000s)
             ),
             yaxis=dict(
                 showgrid=True,

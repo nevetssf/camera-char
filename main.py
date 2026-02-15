@@ -172,6 +172,46 @@ def check_dependencies() -> bool:
     return True
 
 
+def backup_database(config) -> bool:
+    """
+    Create a timestamped backup of the database file.
+
+    Args:
+        config: Configuration manager instance
+
+    Returns:
+        True if backup was successful or no database exists, False on error
+    """
+    from datetime import datetime
+    import shutil
+
+    # Get database path
+    db_path = config.get_working_dir() / 'db' / 'analysis.db'
+
+    # Check if database exists
+    if not db_path.exists():
+        print("  (No database found, skipping backup)")
+        return True
+
+    # Create .archive directory if it doesn't exist
+    archive_dir = config.get_working_dir() / '.archive'
+    archive_dir.mkdir(exist_ok=True)
+
+    # Create timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_filename = f"analysis_{timestamp}.db"
+    backup_path = archive_dir / backup_filename
+
+    try:
+        # Copy database file to archive
+        shutil.copy2(db_path, backup_path)
+        print(f"✓ Database backed up: {backup_filename}")
+        return True
+    except Exception as e:
+        print(f"✗ Database backup failed: {e}")
+        return False
+
+
 def main():
     """Main entry point"""
     print(f"Sensor Analysis v{VERSION}")
@@ -188,6 +228,9 @@ def main():
     config = get_config()
     print(f"✓ Working directory: {config.get_working_dir()}")
     print(f"✓ Source directory: {config.get_source_dir()}")
+
+    # Backup database before starting
+    backup_database(config)
 
     # Initialize logging
     from utils.app_logger import init_logger

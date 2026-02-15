@@ -178,12 +178,6 @@ class DataModel:
             return []
         return sorted([x for x in self.full_data['exposure_time'].unique().tolist() if pd.notna(x)])
 
-    def get_unique_exposure_settings(self) -> List[int]:
-        """Get list of unique exposure settings in the full dataset"""
-        if self.full_data is None:
-            return []
-        return sorted([int(x) for x in self.full_data['exposure_setting'].unique().tolist() if pd.notna(x)])
-
     def get_unique_bit_depths(self) -> List[int]:
         """Get list of unique bit depths in the full dataset"""
         if self.full_data is None:
@@ -231,7 +225,11 @@ class DataModel:
 
         for field, values in filters.items():
             if values:  # Only apply if values are selected
-                data = data[data[field].isin(values)]
+                # Special handling: exposure_setting filter uses exposure_time values
+                if field == 'exposure_setting':
+                    data = data[data['exposure_time'].isin(values)]
+                else:
+                    data = data[data[field].isin(values)]
 
         self.filtered_data = data
 

@@ -12,8 +12,36 @@ from PyQt6.QtCore import Qt, pyqtSignal, QAbstractTableModel, QModelIndex, QVari
 from PyQt6.QtGui import QFont
 import pandas as pd
 from typing import Optional, List, Any
+from pathlib import Path
 
 from models.data_model import DataModel
+
+
+def format_exposure_time(exposure_time: float) -> str:
+    """
+    Format exposure time for display.
+    If < 1 second: Display as "1/Xs" (e.g., "1/250s")
+    If >= 1 second: Display as "Xs" (e.g., "2s")
+
+    Args:
+        exposure_time: Exposure time in seconds
+
+    Returns:
+        Formatted string
+    """
+    if pd.isna(exposure_time):
+        return "N/A"
+
+    if exposure_time < 1:
+        # Display as fraction (1/X) - use round() not int()
+        denominator = round(1 / exposure_time)
+        return f"1/{denominator}s"
+    else:
+        # Display as whole/decimal seconds
+        if exposure_time == int(exposure_time):
+            return f"{int(exposure_time)}s"
+        else:
+            return f"{exposure_time:.1f}s"
 
 
 class PandasTableModel(QAbstractTableModel):
@@ -55,6 +83,15 @@ class PandasTableModel(QAbstractTableModel):
                 from pathlib import Path
                 return Path(str(value)).name
 
+            # For 'exposure_setting' column, format from exposure_time
+            if column_name == 'exposure_setting':
+                # Get exposure_time from the same row
+                if 'exposure_time' in self._data.columns:
+                    exposure_time = self._data.iloc[index.row()]['exposure_time']
+                    return format_exposure_time(exposure_time)
+                # Fallback to displaying the setting value if no exposure_time
+                return str(value) if pd.notna(value) else "N/A"
+
             # Format floats nicely
             if isinstance(value, float):
                 return f"{value:.6f}"
@@ -93,6 +130,7 @@ class DataBrowser(QWidget):
     # Signals
     row_selected = pyqtSignal(int)  # Emitted when a row is selected
     data_filtered = pyqtSignal()    # Emitted when filters are applied
+    status_message = pyqtSignal(str, int)  # Emitted to show status message (message, timeout_ms)
 
     def __init__(self):
         """Initialize data browser."""
@@ -337,7 +375,11 @@ class DataBrowser(QWidget):
             if filters:
                 data_source = self.data_model.full_data.copy()
                 for field, values in filters.items():
-                    data_source = data_source[data_source[field].isin(values)]
+                    # Special handling: exposure_setting filter uses exposure_time values
+                    if field == 'exposure_setting':
+                        data_source = data_source[data_source['exposure_time'].isin(values)]
+                    else:
+                        data_source = data_source[data_source[field].isin(values)]
             else:
                 data_source = self.data_model.full_data
 
@@ -352,8 +394,13 @@ class DataBrowser(QWidget):
             values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)]) if 'exposure_time' in data_source.columns else []
             items = [f"{v:.6f}s" for v in values]
         elif filter_type == 'exposure_setting':
-            values = sorted([int(x) for x in data_source['exposure_setting'].unique().tolist() if pd.notna(x)]) if 'exposure_setting' in data_source.columns else []
-            items = [f"1/{v}" for v in values]
+            # Get unique exposure_time values and format them
+            if 'exposure_time' in data_source.columns:
+                values = sorted([x for x in data_source['exposure_time'].unique().tolist() if pd.notna(x)])
+                items = [format_exposure_time(v) for v in values]
+            else:
+                values = []
+                items = []
         elif filter_type == 'bits_per_sample':
             values = sorted([x for x in data_source['bits_per_sample'].unique().tolist() if pd.notna(x)]) if 'bits_per_sample' in data_source.columns else []
             items = [f"{v} bit" for v in values]
@@ -588,16 +635,17 @@ class DataBrowser(QWidget):
                 db.mark_archived(image_record['id'], archived=True)
                 logger.info(f"Marked image ID {image_record['id']} as archived in database")
 
+            # Save current filter state before reloading
+            filter_state = self._save_filter_state()
+
             # Reload data to update the table (removes archived images)
             self.reload_data()
 
-            # Show success message
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self,
-                "File Archived",
-                f"File archived successfully:\n{file_path_obj.name}\n\nMoved to:\n{archive_dir}"
-            )
+            # Restore filter state
+            self._restore_filter_state(filter_state)
+
+            # Show success message in status bar
+            self.status_message.emit(f"✓ Archived: {file_path_obj.name} → {archive_dir}", 5000)
             logger.info(f"File archived successfully: {file_path_obj.name} -> {archive_dir}")
 
         except Exception as e:
@@ -763,3 +811,51 @@ class DataBrowser(QWidget):
         # Create new data model instance (reloads from database)
         self.data_model = DataModel()
         self._load_initial_data()
+
+    def _save_filter_state(self) -> List[dict]:
+        """Save current filter state (type and selected values)"""
+        filter_state = []
+        for col_data in self.filter_columns:
+            # Get current filter type
+            filter_type = col_data['current_type']
+
+            # Get selected values
+            list_widget = col_data['list_widget']
+            selected_values = [
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in list_widget.selectedItems()
+            ]
+
+            filter_state.append({
+                'type': filter_type,
+                'selected_values': selected_values
+            })
+
+        return filter_state
+
+    def _restore_filter_state(self, filter_state: List[dict]) -> None:
+        """Restore filter state, gracefully skipping values that no longer exist"""
+        for i, state in enumerate(filter_state):
+            if i >= len(self.filter_columns):
+                break
+
+            col_data = self.filter_columns[i]
+            filter_type = state['type']
+            selected_values = state['selected_values']
+
+            # Set the filter type if it's different
+            if col_data['current_type'] != filter_type:
+                # Find the index of this filter type in the combo
+                type_combo = col_data['type_combo']
+                for idx in range(type_combo.count()):
+                    if type_combo.itemData(idx) == filter_type:
+                        type_combo.setCurrentIndex(idx)
+                        break
+
+            # Select the values that still exist in the list
+            list_widget = col_data['list_widget']
+            for row_idx in range(list_widget.count()):
+                item = list_widget.item(row_idx)
+                value = item.data(Qt.ItemDataRole.UserRole)
+                if value in selected_values:
+                    item.setSelected(True)

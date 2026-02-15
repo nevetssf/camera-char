@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import pyqtSignal
-from typing import Optional
+from typing import Optional, List
 import plotly.graph_objects as go
 import pandas as pd
 from pathlib import Path
@@ -56,6 +56,8 @@ class PlotViewer(QWidget):
 
     def _create_controls(self) -> QGroupBox:
         """Create control group"""
+        from PyQt6.QtWidgets import QCheckBox
+
         group = QGroupBox("Plot")
         layout = QHBoxLayout()
         group.setLayout(layout)
@@ -66,6 +68,13 @@ class PlotViewer(QWidget):
 
         layout.addStretch()
 
+        # Log scale checkbox
+        self.log_scale_checkbox = QCheckBox("Log Scale X-Axis")
+        self.log_scale_checkbox.setChecked(True)  # Default to enabled
+        self.log_scale_checkbox.setToolTip("Use logarithmic scale for x-axis")
+        self.log_scale_checkbox.stateChanged.connect(self._on_log_scale_changed)
+        layout.addWidget(self.log_scale_checkbox)
+
         return group
 
     def _populate_controls(self) -> None:
@@ -73,13 +82,20 @@ class PlotViewer(QWidget):
         # No controls to populate - plot type is auto-detected
         pass
 
-    def generate_plot_from_data(self, filtered_data: Optional[pd.DataFrame] = None) -> None:
+    def generate_plot_from_data(self, filtered_data: Optional[pd.DataFrame] = None,
+                               group_param: str = 'camera',
+                               xaxis_param: str = 'iso',
+                               group_values: Optional[List] = None,
+                               xaxis_values: Optional[List] = None) -> None:
         """
         Generate plot using filtered data from Data Browser.
-        Automatically determines plot type based on what's filtered.
 
         Args:
             filtered_data: DataFrame with filtered data from Data Browser (uses all data if None)
+            group_param: Parameter to group by (e.g., 'camera', 'iso', 'exposure_time')
+            xaxis_param: Parameter for x-axis (e.g., 'iso', 'exposure_time')
+            group_values: Selected values for grouping parameter (None = all values)
+            xaxis_values: Selected values for x-axis parameter (None = all values)
         """
         try:
             # If no data provided, use all data
@@ -91,18 +107,18 @@ class PlotViewer(QWidget):
             # Update status
             self.status_label.setText("Generating plot...")
 
-            # Automatically determine plot type based on filtered data
-            plot_type = self._determine_plot_type(filtered_data)
+            # Filter by x-axis values if specified
+            if xaxis_values and len(xaxis_values) > 0 and xaxis_param in filtered_data.columns:
+                filtered_data = filtered_data[filtered_data[xaxis_param].isin(xaxis_values)]
 
-            # Generate plot based on detected type
-            if plot_type == "ev_vs_iso":
-                fig = self._generate_ev_vs_iso_plot(filtered_data)
-                plot_description = "EV vs ISO"
-            elif plot_type == "ev_vs_time":
-                fig = self._generate_ev_vs_time_plot(filtered_data)
-                plot_description = "EV vs Exposure Time"
-            else:
-                raise ValueError(f"Unknown plot type: {plot_type}")
+            # Get log scale setting from checkbox
+            use_log_scale = self.log_scale_checkbox.isChecked()
+
+            # Generate plot with custom grouping and x-axis
+            fig = self._generate_custom_plot(filtered_data, group_param, xaxis_param, group_values, use_log_scale)
+
+            # Create plot description
+            plot_description = f"EV vs {xaxis_param.replace('_', ' ').title()} (grouped by {group_param.replace('_', ' ').title()})"
 
             # Store figure
             self.current_figure = fig
@@ -116,9 +132,9 @@ class PlotViewer(QWidget):
 
             # Update status and info
             num_points = len(filtered_data)
-            num_cameras = filtered_data['camera'].nunique() if 'camera' in filtered_data.columns else 0
+            num_groups = filtered_data[group_param].nunique() if group_param in filtered_data.columns else 0
             self.status_label.setText(
-                f"{plot_description}: {num_points} data points from {num_cameras} cameras"
+                f"{plot_description}: {num_points} data points, {num_groups} groups"
             )
             self.plot_info_label.setText(f"Showing: {plot_description}")
 
@@ -135,6 +151,12 @@ class PlotViewer(QWidget):
             )
             self.status_label.setText(f"Error: {str(e)}")
             self.plot_info_label.setText("Error generating plot")
+
+    def _on_log_scale_changed(self) -> None:
+        """Handle log scale checkbox state change - regenerate plot"""
+        # Note: Plot will be regenerated when filters change in the data browser
+        # This is just a placeholder for future manual regeneration if needed
+        pass
 
     def _determine_plot_type(self, data: pd.DataFrame) -> str:
         """
@@ -264,6 +286,132 @@ class PlotViewer(QWidget):
 
         return fig
 
+    def _generate_custom_plot(self, data: pd.DataFrame, group_param: str, xaxis_param: str,
+                              group_values: Optional[List] = None, use_log_scale: bool = True) -> go.Figure:
+        """Generate custom plot with specified grouping and x-axis parameters"""
+        import plotly.graph_objects as go
+        import plotly.colors as pc
+
+        # Ensure required columns exist
+        if xaxis_param not in data.columns or 'ev' not in data.columns:
+            raise ValueError(f"Data must contain '{xaxis_param}' and 'ev' columns")
+
+        if group_param not in data.columns:
+            raise ValueError(f"Data must contain '{group_param}' column")
+
+        # Add EV alias if needed
+        if 'EV' not in data.columns and 'ev' in data.columns:
+            data = data.copy()
+            data['EV'] = data['ev']
+
+        # Filter by group values if specified
+        if group_values and len(group_values) > 0:
+            data = data[data[group_param].isin(group_values)]
+
+        # Get unique groups and sort them
+        groups = sorted(data[group_param].unique())
+
+        # Create figure
+        fig = go.Figure()
+
+        # Get color palette
+        colors = pc.qualitative.Plotly
+        color_idx = 0
+
+        # Plot each group
+        for group_value in groups:
+            group_data = data[data[group_param] == group_value]
+
+            # Sort by x-axis parameter
+            group_data = group_data.sort_values(xaxis_param)
+
+            # Create hover template
+            # If x-axis is exposure_time and exposure_setting exists, show setting in hover
+            if xaxis_param == 'exposure_time' and 'exposure_setting' in group_data.columns:
+                # Create custom text with exposure settings formatted as fractions
+                hover_text = []
+                for setting, ev, time_val in zip(group_data['exposure_setting'], group_data['EV'], group_data['exposure_time']):
+                    # Format exposure setting as "1/X" fraction
+                    if pd.notna(setting) and setting != '':
+                        # If setting is already a string like "1/4000", use it
+                        if isinstance(setting, str) and '/' in str(setting):
+                            formatted_setting = setting
+                        else:
+                            # Otherwise, calculate from exposure time
+                            if time_val > 0:
+                                denominator = int(1.0 / time_val)
+                                formatted_setting = f"1/{denominator}"
+                            else:
+                                formatted_setting = str(setting)
+                    else:
+                        # Fallback: calculate from exposure time
+                        if time_val > 0:
+                            denominator = int(1.0 / time_val)
+                            formatted_setting = f"1/{denominator}"
+                        else:
+                            formatted_setting = f"{time_val:.4f}s"
+
+                    hover_text.append(f'{group_param}: {group_value}<br>Exposure: {formatted_setting}<br>EV: {ev:.2f}')
+
+                hovertemplate = '%{text}<extra></extra>'
+                custom_data = {'text': hover_text}
+            else:
+                # Standard hover template
+                xaxis_display = xaxis_param.replace('_', ' ').title()
+                hover_text = None
+                hovertemplate = f'{group_param}: {group_value}<br>{xaxis_display}: %{{x}}<br>EV: %{{y:.2f}}<extra></extra>'
+                custom_data = {}
+
+            # Create trace for this group
+            trace_args = {
+                'x': group_data[xaxis_param],
+                'y': group_data['EV'],
+                'mode': 'lines+markers',
+                'name': str(group_value),
+                'marker': dict(size=8),
+                'line': dict(color=colors[color_idx % len(colors)], width=2),
+                'hovertemplate': hovertemplate
+            }
+
+            # Add custom hover text if using exposure settings
+            if hover_text:
+                trace_args['text'] = hover_text
+                trace_args['hoverinfo'] = 'text'
+
+            fig.add_trace(go.Scatter(**trace_args))
+
+            color_idx += 1
+
+        # Update layout
+        xaxis_label = xaxis_param.replace('_', ' ').title()
+        if xaxis_param == 'exposure_time':
+            xaxis_label = 'Exposure Time (s)'
+        elif xaxis_param == 'iso':
+            xaxis_label = 'ISO'
+
+        fig.update_layout(
+            title=f"EV vs {xaxis_label} (Grouped by {group_param.replace('_', ' ').title()})",
+            xaxis_title=xaxis_label,
+            yaxis_title="Exposure Value (EV)",
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                title=dict(text=group_param.replace('_', ' ').title()),
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02
+            ),
+            template="plotly_white",
+            font=dict(family="Arial, sans-serif", size=12),
+            margin=dict(l=60, r=150, t=60, b=60),
+        )
+
+        # Use log scale if enabled by checkbox
+        if use_log_scale:
+            fig.update_xaxes(type='log')
+
+        return fig
 
     def export_plot(self, file_path: str) -> None:
         """

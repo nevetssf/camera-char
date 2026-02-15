@@ -33,6 +33,10 @@ class ImageViewer(QWidget):
         self.current_metadata: Optional[Dict[str, Any]] = None
         self.current_pixmap: Optional[QPixmap] = None
         self.current_display_array: Optional[np.ndarray] = None
+        self.current_raw_data: Optional[np.ndarray] = None
+        self.current_stats: Optional[Dict[str, Any]] = None
+        self.current_file_hash: Optional[str] = None
+        self.current_camera_id: Optional[int] = None
 
         # Persistent image window
         self.image_window: Optional[ImageWindow] = None
@@ -110,36 +114,87 @@ class ImageViewer(QWidget):
             camera_model: Camera model for crop lookup
         """
         from utils.app_logger import get_logger
+        import rawpy
+        from PyQt6.QtGui import QPixmap, QImage
+        from sensor_camera import Sensor
         logger = get_logger()
 
         try:
             logger.info(f"Loading image: {file_path}")
             logger.debug(f"  fast_preview: {fast_preview}, camera_model: {camera_model}")
 
-            # Load image using image loader
-            logger.debug("Calling image_loader.load_image()")
-            image_array = self.image_loader.load_image(
-                file_path,
-                fast_preview=fast_preview,
-                camera_model=camera_model
-            )
-            logger.debug(f"Image loaded, shape: {image_array.shape}, dtype: {image_array.dtype}")
+            # Load raw data directly without color processing (greyscale)
+            logger.debug("Loading raw greyscale data")
+            with rawpy.imread(str(file_path)) as raw:
+                # Get raw pixel data (greyscale)
+                raw_data = raw.raw_image.copy()
 
-            # Normalize for display
-            logger.debug("Normalizing image for display")
-            display_array = normalize_for_display(image_array)
-            logger.debug(f"Normalized array shape: {display_array.shape}, dtype: {display_array.dtype}")
+                # Apply camera-specific crop if available
+                crop = Sensor.CAMERA_CROPS.get(camera_model) if camera_model else None
+                if crop is not None:
+                    logger.debug(f"Applying crop for {camera_model}")
+                    raw_data = raw_data[crop]
 
-            # Convert to QPixmap
-            logger.debug("Converting to QPixmap")
-            pixmap = self._numpy_to_pixmap(display_array)
-            logger.debug(f"QPixmap created, size: {pixmap.width()}x{pixmap.height()}")
+                # Calculate statistics
+                mean_val = float(np.mean(raw_data))
+                std_val = float(np.std(raw_data))
+                ydim, xdim = raw_data.shape
+                bit_depth = raw_data.dtype.itemsize * 8
+                min_val = int(np.min(raw_data))
+                max_val = int(np.max(raw_data))
+
+                logger.debug(f"Image loaded, shape: {raw_data.shape}, dtype: {raw_data.dtype}, greyscale")
+
+                # Normalize to 8-bit for display
+                if raw_data.dtype == np.uint16:
+                    display_array = (raw_data.astype(np.float32) / 65535.0 * 255.0).astype(np.uint8)
+                elif raw_data.dtype == np.uint8:
+                    display_array = raw_data
+                else:
+                    # For other types, normalize to full range
+                    if max_val > min_val:
+                        display_array = ((raw_data.astype(np.float32) - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+                    else:
+                        display_array = np.zeros_like(raw_data, dtype=np.uint8)
+
+                # Convert to QImage (greyscale)
+                bytes_per_line = xdim
+                qimage = QImage(display_array.data, xdim, ydim, bytes_per_line, QImage.Format.Format_Grayscale8)
+                pixmap = QPixmap.fromImage(qimage)
+                logger.debug(f"QPixmap created, size: {pixmap.width()}x{pixmap.height()}, greyscale")
+
+                # Prepare statistics dictionary
+                stats = {
+                    'bit_depth': bit_depth,
+                    'width': xdim,
+                    'height': ydim,
+                    'mean': mean_val,
+                    'std': std_val,
+                    'min': min_val,
+                    'max': max_val
+                }
+
+            # Calculate file hash and look up camera ID
+            file_hash = None
+            camera_id = None
+            try:
+                from utils.db_manager import get_db_manager
+                db = get_db_manager()
+                file_hash = db.calculate_file_hash(Path(file_path))
+                camera_id = db.get_camera_id_by_file_hash(file_hash)
+                logger.debug(f"Looked up camera_id={camera_id} from file hash")
+            except Exception as e:
+                logger.debug(f"Could not look up camera ID: {e}")
 
             # Store for popup window
             self.current_pixmap = pixmap
             self.current_display_array = display_array
             self.current_file_path = file_path
             self.current_camera_model = camera_model
+            self.current_raw_data = raw_data
+            self.current_stats = stats
+            self.current_file_hash = file_hash
+            self.current_camera_id = camera_id
 
             # Load and display metadata
             logger.debug("Loading metadata")
@@ -150,7 +205,11 @@ class ImageViewer(QWidget):
 
             # Update image window if it's open
             if self.image_window and self.image_window.isVisible():
-                self.image_window.load_image(pixmap, display_array, file_path)
+                self.image_window.load_image(
+                    pixmap, display_array, file_path,
+                    stats=stats, raw_data=raw_data,
+                    file_hash=file_hash, camera_id=camera_id
+                )
 
             # Emit signal
             logger.info(f"Image loaded successfully: {Path(file_path).name}")
@@ -406,11 +465,15 @@ class ImageViewer(QWidget):
         if self.image_window is None:
             self.image_window = ImageWindow(self)
 
-        # Load image
+        # Load image with all data for greyscale display and analysis
         self.image_window.load_image(
             self.current_pixmap,
             self.current_display_array,
-            self.current_file_path
+            self.current_file_path,
+            stats=self.current_stats,
+            raw_data=self.current_raw_data,
+            file_hash=self.current_file_hash,
+            camera_id=self.current_camera_id
         )
 
         # Show the window

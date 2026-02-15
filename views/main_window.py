@@ -127,6 +127,10 @@ class MainWindow(QMainWindow):
         self.action_db_export.setStatusTip("Export database to CSV file")
         self.action_db_export.triggered.connect(self._on_db_export)
 
+        self.action_db_rescan = QAction("Rescan...", self)
+        self.action_db_rescan.setStatusTip("Rescan database: remove missing images, re-analyze existing, add new images")
+        self.action_db_rescan.triggered.connect(self._on_db_rescan)
+
         self.action_refresh = QAction("Refresh", self)
         self.action_refresh.setShortcut("F5")
         self.action_refresh.setStatusTip("Refresh data from database")
@@ -171,6 +175,7 @@ class MainWindow(QMainWindow):
         database_menu.addSeparator()
         database_menu.addAction(self.action_db_stats)
         database_menu.addAction(self.action_db_export)
+        database_menu.addAction(self.action_db_rescan)
         database_menu.addSeparator()
         database_menu.addAction(self.action_db_clear)
 
@@ -956,6 +961,198 @@ Database Location:
                 "Export Failed",
                 f"Failed to export database:\n{str(e)}"
             )
+
+    def _on_db_rescan(self) -> None:
+        """Handle database rescan action with blocking progress dialog"""
+        from PyQt6.QtCore import QThread, pyqtSignal, QTimer
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from utils.analysis_runner import AnalysisRunner
+        import re
+        import time
+
+        # Check if already running
+        if hasattr(self, '_rescan_thread') and self._rescan_thread and self._rescan_thread.isRunning():
+            QMessageBox.warning(self, "Rescan in Progress", "Database rescan is already in progress.")
+            return
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            "Rescan Database",
+            "This will:\n\n"
+            "• Check all database images and remove missing files\n"
+            "• Re-analyze existing images (recalculate noise statistics)\n"
+            "• Scan source directory for new images\n\n"
+            "This may take a while depending on the number of images.\n\n"
+            "Do you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Thread for rescanning
+        class RescanThread(QThread):
+            progress = pyqtSignal(str)
+            finished_signal = pyqtSignal(dict)
+            error = pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.cancel_requested = False
+
+            def run(self):
+                try:
+                    runner = AnalysisRunner()
+                    result = runner.rescan_database(
+                        progress_callback=lambda msg: self.progress.emit(msg),
+                        reanalyze_existing=True,
+                        cancel_flag=lambda: self.cancel_requested
+                    )
+                    self.finished_signal.emit(result)
+                except Exception as e:
+                    import traceback
+                    self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
+
+        self._rescan_thread = RescanThread()
+
+        # Create blocking progress dialog
+        progress_dialog = QProgressDialog("Preparing to scan database...", "Cancel", 0, 100, self)
+        progress_dialog.setWindowTitle("Database Rescan")
+        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setAutoReset(False)
+        progress_dialog.setMinimumDuration(0)  # Show immediately
+        progress_dialog.setValue(0)
+
+        # Track timing for ETA
+        start_time = time.time()
+        current_phase = None
+        phase_start_time = start_time
+
+        def format_time(seconds):
+            """Format seconds into human-readable time"""
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                mins = int(seconds / 60)
+                secs = int(seconds % 60)
+                return f"{mins}m {secs}s"
+            else:
+                hours = int(seconds / 3600)
+                mins = int((seconds % 3600) / 60)
+                return f"{hours}h {mins}m"
+
+        def on_progress(message):
+            nonlocal current_phase, phase_start_time
+
+            # Check if dialog was cancelled
+            if progress_dialog.wasCanceled():
+                self._rescan_thread.cancel_requested = True
+                return
+
+            # Parse progress message
+            # Format: "Database Check: Image 1/1456 - ..." or "Scanning Files: Image 1/250 - ..."
+            match = re.match(r'(Database Check|Scanning Files): Image (\d+)/(\d+)', message)
+
+            if match:
+                phase = match.group(1)
+                current = int(match.group(2))
+                total = int(match.group(3))
+
+                # Check if phase changed
+                if phase != current_phase:
+                    current_phase = phase
+                    phase_start_time = time.time()
+
+                # Calculate progress percentage
+                progress_pct = int((current / total) * 100)
+                progress_dialog.setValue(progress_pct)
+
+                # Calculate ETA
+                elapsed = time.time() - phase_start_time
+                if current > 0 and elapsed > 0:
+                    time_per_item = elapsed / current
+                    remaining_items = total - current
+                    eta_seconds = time_per_item * remaining_items
+                    eta_str = format_time(eta_seconds)
+
+                    # Update dialog label with phase, progress, and ETA
+                    label_text = f"{phase}\n{current}/{total} images\nEstimated time remaining: {eta_str}"
+                else:
+                    label_text = f"{phase}\n{current}/{total} images"
+
+                progress_dialog.setLabelText(label_text)
+            else:
+                # Fallback for messages without counts
+                progress_dialog.setLabelText(message)
+
+        def on_finished(result):
+            progress_dialog.close()
+
+            # Check if cancelled
+            if self._rescan_thread.cancel_requested:
+                QMessageBox.information(self, "Rescan Cancelled", "Database rescan was cancelled by user.")
+                self.status_bar.showMessage("Database rescan cancelled", 5000)
+
+                # Refresh data to show any partial changes
+                try:
+                    self.data_browser.reload_data()
+                    self.update_db_status()
+                except Exception:
+                    pass
+                return
+
+            # Final refresh
+            try:
+                self.data_browser.reload_data()
+                self.update_db_status()
+            except Exception:
+                pass
+
+            # Show completion dialog
+            removed = result.get('removed', 0)
+            reanalyzed = result.get('reanalyzed', 0)
+            added = result.get('added', 0)
+            skipped = result.get('skipped', 0)
+
+            total_time = time.time() - start_time
+            time_str = format_time(total_time)
+
+            message = f"Database rescan complete!\n\n"
+            message += f"• Removed: {removed} missing images\n"
+            message += f"• Re-analyzed: {reanalyzed} existing images\n"
+            message += f"• Added: {added} new images\n"
+            message += f"• Skipped: {skipped} existing images\n\n"
+            message += f"Total time: {time_str}"
+
+            QMessageBox.information(self, "Rescan Complete", message)
+
+            # Update status bar
+            self.status_bar.showMessage(
+                f"✓ Rescan complete! Removed {removed}, re-analyzed {reanalyzed}, added {added}",
+                10000
+            )
+
+        def on_error(error_msg):
+            progress_dialog.close()
+
+            # Show error in status bar
+            self.status_bar.showMessage(f"✗ Rescan error", 10000)
+
+            # Show error dialog
+            QMessageBox.critical(self, "Rescan Failed", f"Failed to rescan database:\n\n{error_msg}")
+
+        self._rescan_thread.progress.connect(on_progress)
+        self._rescan_thread.finished_signal.connect(on_finished)
+        self._rescan_thread.error.connect(on_error)
+
+        # Start rescan thread
+        self._rescan_thread.start()
+
+        # Show progress dialog (blocking)
+        progress_dialog.show()
 
     def _on_db_refresh(self) -> None:
         """Handle refresh data from database action"""

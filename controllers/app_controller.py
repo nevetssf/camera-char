@@ -252,7 +252,17 @@ class AppController(QObject):
 
         # Auto-regenerate plot with filtered data
         filtered_data = self.main_window.data_browser.data_model.get_data()
-        self.main_window.plot_viewer.generate_plot_from_data(filtered_data)
+        group_param = self.main_window.data_browser.get_group_parameter()
+        xaxis_param = self.main_window.data_browser.get_xaxis_parameter()
+        group_values = self.main_window.data_browser.get_group_selected_values()
+        xaxis_values = self.main_window.data_browser.get_xaxis_selected_values()
+        self.main_window.plot_viewer.generate_plot_from_data(
+            filtered_data,
+            group_param=group_param,
+            xaxis_param=xaxis_param,
+            group_values=group_values,
+            xaxis_values=xaxis_values
+        )
 
     def load_image_background(self, file_path: str,
                             camera_model: Optional[str] = None,

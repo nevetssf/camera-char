@@ -575,10 +575,19 @@ class AnalysisRunner:
 
                 white_level = exif_data.get('SubIFD:WhiteLevel')
                 if white_level is None:
-                    white_level = 65535  # Default for 16-bit
+                    # Try to calculate from BitsPerSample
+                    bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                    if bits_per_sample is not None:
+                        white_level = 2 ** int(bits_per_sample) - 1
+                    else:
+                        # Set to NaN to track missing data
+                        white_level = np.nan
 
                 # Calculate EV: log2((white_level - black_level) / std)
-                ev = np.log((white_level - black_level) / noise_std) / np.log(2)
+                if not np.isnan(white_level) and noise_std > 0:
+                    ev = np.log((white_level - black_level) / noise_std) / np.log(2)
+                else:
+                    ev = None
 
                 # Get exposure settings
                 iso = exif_data.get('EXIF:ISO')
@@ -651,6 +660,298 @@ class AnalysisRunner:
             )
 
         return {'added': images_added, 'skipped': images_skipped}
+
+    def rescan_database(self, progress_callback=None, reanalyze_existing=True, cancel_flag=None) -> Dict[str, int]:
+        """
+        Rescan database: remove missing images, re-analyze existing, add new images.
+
+        Args:
+            progress_callback: Optional callback for progress updates
+            reanalyze_existing: If True, recalculate analysis for existing images
+            cancel_flag: Optional callable that returns True if cancellation is requested
+
+        Returns:
+            Dictionary with 'removed', 'reanalyzed', 'added', and 'skipped' counts
+        """
+        source_dir = self.config.get_source_dir()
+        if not source_dir or not source_dir.exists():
+            raise ValueError(
+                f"Source directory not found: {source_dir}\n"
+                "Please set source directory in Settings menu."
+            )
+
+        db = get_db_manager()
+        images_removed = 0
+        images_reanalyzed = 0
+        images_added = 0
+        images_skipped = 0
+
+        # Step 1: Check existing database images and remove missing ones
+        if progress_callback:
+            progress_callback("Checking existing database images...")
+
+        # Get all images from database
+        with db.get_connection() as conn:
+            cursor = conn.execute("SELECT id, file_path FROM images")
+            db_images = cursor.fetchall()
+
+        total_db_images = len(db_images)
+        if progress_callback:
+            progress_callback(f"Found {total_db_images} images in database")
+
+        # Check each database image
+        for idx, row in enumerate(db_images):
+            # Check for cancellation
+            if cancel_flag and cancel_flag():
+                if progress_callback:
+                    progress_callback("Rescan cancelled by user")
+                return {'removed': images_removed, 'reanalyzed': images_reanalyzed, 'added': images_added, 'skipped': images_skipped}
+
+            image_id = row['id']
+            file_path = Path(row['file_path'])
+            current = idx + 1
+
+            # Check if file exists
+            if not file_path.exists():
+                # File missing - remove from database
+                try:
+                    with db.get_connection() as conn:
+                        conn.execute("DELETE FROM exif_data WHERE image_id = ?", (image_id,))
+                        conn.execute("DELETE FROM analysis_results WHERE image_id = ?", (image_id,))
+                        conn.execute("DELETE FROM images WHERE id = ?", (image_id,))
+                    images_removed += 1
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback(f"Database Check: Image {current}/{total_db_images} - Error removing {file_path.name}")
+            elif reanalyze_existing:
+                # File exists - optionally re-analyze it
+                try:
+                    # Get EXIF data
+                    with exiftool.ExifToolHelper() as et:
+                        exif_list = et.get_metadata([str(file_path)])
+                        exif_data = exif_list[0] if exif_list else {}
+
+                    # Get info for status message
+                    camera_model = exif_data.get('EXIF:Model', 'Unknown')
+                    iso = exif_data.get('EXIF:ISO', 'N/A')
+                    exposure_time = exif_data.get('EXIF:ExposureTime')
+                    if exposure_time and exposure_time > 0:
+                        exposure_setting = f"1/{int(1.0/exposure_time)}"
+                    else:
+                        exposure_setting = 'N/A'
+
+                    # Show progress with detailed info
+                    if progress_callback:
+                        progress_callback(f"Database Check: Image {current}/{total_db_images} - {camera_model} | ISO {iso} | {exposure_setting}")
+
+                    # Process raw file for noise analysis
+                    import rawpy
+                    import numpy as np
+
+                    raw = rawpy.imread(str(file_path))
+                    image = raw.raw_image.copy()
+
+                    # Apply camera-specific crop if needed
+                    if camera_model in Sensor.CAMERA_CROPS:
+                        crop = Sensor.CAMERA_CROPS[camera_model]
+                        image = image[crop]
+
+                    # Calculate noise statistics
+                    noise_std = float(np.std(image))
+                    noise_mean = float(np.mean(image))
+
+                    # Get black and white levels
+                    black_level = exif_data.get('SubIFD:BlackLevel')
+                    white_level = exif_data.get('SubIFD:WhiteLevel')
+
+                    # Set defaults if not found
+                    if black_level is None:
+                        black_level = 0
+                    if white_level is None:
+                        # Try to calculate from BitsPerSample
+                        bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                        if bits_per_sample is not None:
+                            white_level = 2 ** int(bits_per_sample) - 1
+                        else:
+                            # Set to NaN to track missing data
+                            white_level = np.nan
+
+                    # Calculate EV: log2((white_level - black_level) / std)
+                    if noise_std > 0 and not np.isnan(white_level):
+                        ev = np.log2((white_level - black_level) / noise_std)
+                    else:
+                        ev = None
+
+                    # Update analysis results
+                    if ev is not None:
+                        with db.get_connection() as conn:
+                            conn.execute(
+                                "UPDATE analysis_results SET ev = ?, noise_std = ?, noise_mean = ? WHERE image_id = ?",
+                                (float(ev), noise_std, noise_mean, image_id)
+                            )
+                        images_reanalyzed += 1
+
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback(f"Database Check: Image {current}/{total_db_images} - Error: {file_path.name}")
+
+        if progress_callback:
+            progress_callback(f"Database check complete: {images_removed} removed, {images_reanalyzed} re-analyzed")
+
+        # Step 2: Scan for new images
+        if progress_callback:
+            progress_callback("Scanning for new images...")
+
+        # Find all DNG and ERF files recursively
+        image_extensions = ['.dng', '.DNG', '.erf', '.ERF']
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(source_dir.rglob(f'*{ext}'))
+
+        total_files = len(image_files)
+        if progress_callback:
+            progress_callback(f"Found {total_files} image files in source directory")
+
+        # Calculate padding width for numbers
+        num_width = len(str(total_files))
+
+        # Process each image file
+        for idx, file_path in enumerate(image_files):
+            # Check for cancellation
+            if cancel_flag and cancel_flag():
+                if progress_callback:
+                    progress_callback("Rescan cancelled by user")
+                return {'removed': images_removed, 'reanalyzed': images_reanalyzed, 'added': images_added, 'skipped': images_skipped}
+
+            current = idx + 1
+
+            try:
+                # Calculate file hash
+                file_hash = db.calculate_file_hash(file_path)
+
+                # Check if image with this hash already exists
+                existing = db.get_image_by_hash(file_hash)
+                if existing:
+                    images_skipped += 1
+                    continue
+
+                # New image - get EXIF data for status message
+                with exiftool.ExifToolHelper() as et:
+                    exif_list = et.get_metadata([str(file_path)])
+                    exif_data = exif_list[0] if exif_list else {}
+
+                # Get info for status message
+                camera_model = exif_data.get('EXIF:Model', 'Unknown')
+                iso = exif_data.get('EXIF:ISO', 'N/A')
+                exposure_time = exif_data.get('EXIF:ExposureTime')
+                if exposure_time and exposure_time > 0:
+                    exposure_setting = f"1/{int(1.0/exposure_time)}"
+                else:
+                    exposure_setting = 'N/A'
+
+                # Show progress with detailed info
+                if progress_callback:
+                    progress_callback(f"Scanning Files: Image {current}/{total_files} - {camera_model} | ISO {iso} | {exposure_setting}")
+
+                # Process raw file for noise analysis
+                import rawpy
+                import numpy as np
+
+                raw = rawpy.imread(str(file_path))
+                image = raw.raw_image.copy()
+
+                # Apply camera-specific crop if needed
+                camera_model = exif_data.get('EXIF:Model', 'Unknown')
+                if camera_model in Sensor.CAMERA_CROPS:
+                    crop = Sensor.CAMERA_CROPS[camera_model]
+                    image = image[crop]
+
+                # Calculate noise statistics
+                noise_std = float(np.std(image))
+                noise_mean = float(np.mean(image))
+
+                # Get black and white levels
+                black_level = exif_data.get('SubIFD:BlackLevel')
+                white_level = exif_data.get('SubIFD:WhiteLevel')
+
+                # Set defaults if not found
+                if black_level is None:
+                    black_level = 0
+                if white_level is None:
+                    # Try to calculate from BitsPerSample
+                    bits_per_sample = exif_data.get('SubIFD:BitsPerSample')
+                    if bits_per_sample is not None:
+                        white_level = 2 ** int(bits_per_sample) - 1
+                    else:
+                        # Set to NaN to track missing data
+                        white_level = np.nan
+
+                # Calculate EV: log2((white_level - black_level) / std)
+                if noise_std > 0 and not np.isnan(white_level):
+                    ev = np.log2((white_level - black_level) / noise_std)
+                else:
+                    ev = None
+
+                # Get camera info
+                camera_make = exif_data.get('EXIF:Make', 'Unknown')
+                camera_serial = exif_data.get('EXIF:SerialNumber')
+
+                # Get dimensions from EXIF
+                xdim = exif_data.get('SubIFD:ImageWidth')
+                ydim = exif_data.get('SubIFD:ImageHeight')
+
+                if not xdim or not ydim:
+                    images_skipped += 1
+                    continue
+
+                # Insert image record
+                image_id = db.insert_image(
+                    file_path=file_path,
+                    xdim=int(xdim),
+                    ydim=int(ydim),
+                    camera_make=camera_make,
+                    camera_model=camera_model,
+                    camera_serial=camera_serial
+                )
+
+                # Insert analysis results with calculated values
+                if ev is not None:
+                    db.insert_analysis_results(
+                        image_id=image_id,
+                        ev=float(ev),
+                        noise_std=noise_std,
+                        noise_mean=noise_mean
+                    )
+
+                # Insert EXIF data with exposure settings and levels
+                db.insert_exif_data(
+                    image_id,
+                    exif_data,
+                    iso=iso,
+                    exposure_time=exposure_time,
+                    black_level=black_level,
+                    white_level=white_level
+                )
+
+                images_added += 1
+
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Scanning Files: Image {current}/{total_files} - Error: {file_path.name}")
+                images_skipped += 1
+                continue
+
+        if progress_callback:
+            progress_callback(
+                f"✓ Rescan complete! Removed {images_removed}, re-analyzed {images_reanalyzed}, added {images_added}, skipped {images_skipped}"
+            )
+
+        return {
+            'removed': images_removed,
+            'reanalyzed': images_reanalyzed,
+            'added': images_added,
+            'skipped': images_skipped
+        }
 
     def get_status(self) -> Dict[str, any]:
         """Get current analysis status"""

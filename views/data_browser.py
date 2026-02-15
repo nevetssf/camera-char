@@ -110,6 +110,9 @@ class DataBrowser(QWidget):
         else:
             self.source_directory = None
 
+        # Track if we've connected the selection signal
+        self._selection_connected = False
+
         # Create UI
         self._create_ui()
         self._load_initial_data()
@@ -185,6 +188,9 @@ class DataBrowser(QWidget):
             ('exposure_time', 'Exposure Time'),
         ]
 
+        # Column labels: Filter, Group, X-Axis
+        self.column_labels = ['Filter', 'Group', 'X-Axis']
+
         # Create 3 filter columns
         columns_layout = QHBoxLayout()
 
@@ -205,13 +211,21 @@ class DataBrowser(QWidget):
 
     def _create_filter_column(self, index: int) -> tuple:
         """Create a single filter column"""
-        # Default filters: camera, iso, exposure_setting
-        default_filters = ['camera', 'iso', 'exposure_setting']
+        # Default filters: camera, iso, exposure_time
+        default_filters = ['camera', 'iso', 'exposure_time']
         default_filter = default_filters[index] if index < len(default_filters) else 'camera'
 
         col_widget = QWidget()
         col_layout = QVBoxLayout()
         col_widget.setLayout(col_layout)
+
+        # Add column label
+        label = QLabel(self.column_labels[index])
+        label_font = QFont()
+        label_font.setBold(True)
+        label.setFont(label_font)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_layout.addWidget(label)
 
         # Dropdown to select filter type
         type_combo = QComboBox()
@@ -380,6 +394,13 @@ class DataBrowser(QWidget):
         else:
             self.table_view.model().update_data(data)
 
+        # Connect selection changed signal (only once)
+        if not self._selection_connected:
+            selection_model = self.table_view.selectionModel()
+            if selection_model:
+                selection_model.selectionChanged.connect(self._on_selection_changed)
+                self._selection_connected = True
+
         # Add Archive buttons to the last column
         num_cols = self.table_view.model().columnCount()
         archive_col = num_cols - 1
@@ -483,6 +504,14 @@ class DataBrowser(QWidget):
         row = index.row()
         # Could open image viewer or details dialog
         self.row_selected.emit(row)
+
+    def _on_selection_changed(self, selected, deselected) -> None:
+        """Handle selection change (e.g., from arrow key navigation)"""
+        # Get the currently selected row
+        indexes = self.table_view.selectionModel().selectedRows()
+        if indexes:
+            row = indexes[0].row()
+            self.row_selected.emit(row)
 
     def _on_source_path_clicked(self, event) -> None:
         """Handle source path label click - open directory in Finder/Explorer"""
@@ -675,6 +704,34 @@ class DataBrowser(QWidget):
     def get_filtered_data(self) -> pd.DataFrame:
         """Get currently filtered data"""
         return self.data_model.get_data()
+
+    def get_group_parameter(self) -> str:
+        """Get the parameter to group by (from column 2)"""
+        if len(self.filter_columns) >= 2:
+            return self.filter_columns[1]['current_type']
+        return 'camera'  # Default fallback
+
+    def get_xaxis_parameter(self) -> str:
+        """Get the parameter for x-axis (from column 3)"""
+        if len(self.filter_columns) >= 3:
+            return self.filter_columns[2]['current_type']
+        return 'iso'  # Default fallback
+
+    def get_group_selected_values(self) -> List[Any]:
+        """Get selected values from group column (column 2)"""
+        if len(self.filter_columns) >= 2:
+            col_data = self.filter_columns[1]
+            list_widget = col_data['list_widget']
+            return [item.data(Qt.ItemDataRole.UserRole) for item in list_widget.selectedItems()]
+        return []
+
+    def get_xaxis_selected_values(self) -> List[Any]:
+        """Get selected values from x-axis column (column 3)"""
+        if len(self.filter_columns) >= 3:
+            col_data = self.filter_columns[2]
+            list_widget = col_data['list_widget']
+            return [item.data(Qt.ItemDataRole.UserRole) for item in list_widget.selectedItems()]
+        return []
 
     def export_data(self, file_path: str) -> None:
         """

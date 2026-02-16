@@ -6,9 +6,9 @@ Uses the existing sensor_camera.Analysis class to scan and analyze images.
 from pathlib import Path
 from typing import List, Dict, Optional
 from collections import OrderedDict
-import exiftool
 
 from sensor_camera import Analysis, Sensor
+from utils.exiftool_helper import get_exiftool_helper
 from utils.config_manager import get_config
 from utils.db_manager import get_db_manager
 from utils.app_logger import get_logger
@@ -149,7 +149,7 @@ class AnalysisRunner:
                         continue
 
                     # Get EXIF data
-                    with exiftool.ExifToolHelper() as et:
+                    with get_exiftool_helper() as et:
                         exif_list = et.get_metadata([str(file_path)])
                         exif_data = exif_list[0] if exif_list else {}
 
@@ -303,7 +303,7 @@ class AnalysisRunner:
                     continue
 
                 # Get EXIF data
-                with exiftool.ExifToolHelper() as et:
+                with get_exiftool_helper() as et:
                     exif_list = et.get_metadata([str(file_path)])
                     exif_data = exif_list[0] if exif_list else {}
 
@@ -412,7 +412,7 @@ class AnalysisRunner:
                     continue
 
                 # Get EXIF data
-                with exiftool.ExifToolHelper() as et:
+                with get_exiftool_helper() as et:
                     exif_list = et.get_metadata([str(file_path)])
                     exif_data = exif_list[0] if exif_list else {}
 
@@ -562,7 +562,7 @@ class AnalysisRunner:
                     progress_callback(f"Loading: Analyzing {current}/{total_files} - {file_path.name}")
 
                 # Get EXIF data
-                with exiftool.ExifToolHelper() as et:
+                with get_exiftool_helper() as et:
                     exif_list = et.get_metadata([str(file_path)])
                     exif_data = exif_list[0] if exif_list else {}
                     # Log EXIF keys related to white level
@@ -815,7 +815,7 @@ class AnalysisRunner:
                 # File exists - optionally re-analyze it
                 try:
                     # Get EXIF data
-                    with exiftool.ExifToolHelper() as et:
+                    with get_exiftool_helper() as et:
                         exif_list = et.get_metadata([str(file_path)])
                         exif_data = exif_list[0] if exif_list else {}
 
@@ -989,7 +989,7 @@ class AnalysisRunner:
                         continue
 
                     # New image - get EXIF data for status message
-                    with exiftool.ExifToolHelper() as et:
+                    with get_exiftool_helper() as et:
                         exif_list = et.get_metadata([str(file_path)])
                         exif_data = exif_list[0] if exif_list else {}
 

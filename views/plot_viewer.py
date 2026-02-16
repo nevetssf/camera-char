@@ -242,13 +242,12 @@ class PlotViewer(QWidget):
             self.current_figure = fig
 
             # Convert to HTML and display with responsive sizing
+            # include_plotlyjs=True embeds plotly.js inline for offline support
             html = fig.to_html(
-                include_plotlyjs='cdn',
+                include_plotlyjs=True,
                 config={'responsive': True}
             )
-            # Set HTML with base URL to ensure resources load correctly
-            from PyQt6.QtCore import QUrl
-            self.web_view.setHtml(html, QUrl("https://cdn.plot.ly/"))
+            self.web_view.setHtml(html)
 
             # Update status
             num_points = len(filtered_data)

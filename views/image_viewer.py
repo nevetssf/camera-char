@@ -279,9 +279,9 @@ class ImageViewer(QWidget):
 
         try:
             logger.debug("Loading metadata with ExifTool")
-            import exiftool
+            from utils.exiftool_helper import get_exiftool_helper
 
-            with exiftool.ExifToolHelper() as et:
+            with get_exiftool_helper() as et:
                 metadata_list = et.get_metadata([file_path])
                 if not metadata_list:
                     self.current_metadata = {}

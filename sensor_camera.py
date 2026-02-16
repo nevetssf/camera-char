@@ -8,8 +8,14 @@ import pandas as pd
 from tqdm import tqdm
 
 # Raw-specific modules
-import exiftool
 import rawpy
+try:
+    from utils.exiftool_helper import get_exiftool_helper
+except ImportError:
+    # Fallback for standalone use of sensor_camera.py
+    import exiftool
+    def get_exiftool_helper(**kwargs):
+        return exiftool.ExifToolHelper(**kwargs)
 
 # GPU acceleration (optional)
 try:
@@ -291,7 +297,7 @@ class Sensor(object):
         
         results = []
         
-        with exiftool.ExifToolHelper() as et:
+        with get_exiftool_helper() as et:
             # Create progress bar
             with tqdm(total=len(file_list), desc='Scanning files', unit='file') as pbar:
                 for filename in file_list:

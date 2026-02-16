@@ -9,10 +9,31 @@ from raw DNG/ERF files and aggregate analysis data.
 
 import sys
 import os
+import stat
 from pathlib import Path
 
 # Version tracking
 VERSION = "0.1"
+
+
+def _setup_frozen_env() -> None:
+    """Configure environment when running as a frozen PyInstaller bundle."""
+    if not getattr(sys, 'frozen', False):
+        return
+
+    bundle_dir = Path(sys._MEIPASS)
+
+    # Set PERL5LIB so bundled ExifTool Perl modules are found
+    lib_path = bundle_dir / 'exiftool_perl' / 'lib'
+    if lib_path.exists():
+        os.environ['PERL5LIB'] = str(lib_path)
+
+    # Ensure bundled exiftool script is executable
+    exiftool_path = bundle_dir / 'exiftool_perl' / 'exiftool'
+    if exiftool_path.exists():
+        st = exiftool_path.stat()
+        if not (st.st_mode & stat.S_IEXEC):
+            exiftool_path.chmod(st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _set_macos_app_name(name: str) -> None:
@@ -132,6 +153,10 @@ def check_dependencies() -> bool:
     Returns:
         True if all dependencies are met, False otherwise
     """
+    # When frozen (PyInstaller), all dependencies are already bundled
+    if getattr(sys, 'frozen', False):
+        return True
+
     # Note: Analysis data is now stored in SQLite database
     # Database will be created in working directory under db/analysis.db
 
@@ -214,6 +239,9 @@ def backup_database(config) -> bool:
 
 def main():
     """Main entry point"""
+    # Configure frozen environment (PyInstaller bundle) before anything else
+    _setup_frozen_env()
+
     print(f"Sensor Analysis v{VERSION}")
     print("=" * 50)
 

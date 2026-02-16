@@ -8,7 +8,8 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
-import exiftool
+
+from utils.exiftool_helper import get_exiftool_helper
 
 
 class ImageModel:
@@ -135,7 +136,7 @@ class ImageModel:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         try:
-            with exiftool.ExifToolHelper() as et:
+            with get_exiftool_helper() as et:
                 metadata_list = et.get_metadata([str(file_path)])
                 if metadata_list:
                     raw_metadata = metadata_list[0]

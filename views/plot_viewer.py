@@ -243,11 +243,21 @@ class PlotViewer(QWidget):
 
             # Convert to HTML and display with responsive sizing
             # include_plotlyjs=True embeds plotly.js inline for offline support
+            # Write to temp file because embedded plotly.js (~3.4MB) exceeds
+            # QWebEngineView.setHtml()'s ~2MB limit
+            import tempfile
+            from PyQt6.QtCore import QUrl
             html = fig.to_html(
                 include_plotlyjs=True,
                 config={'responsive': True}
             )
-            self.web_view.setHtml(html)
+            if not hasattr(self, '_plot_tmp_file'):
+                self._plot_tmp_file = tempfile.NamedTemporaryFile(
+                    suffix='.html', delete=False, mode='w', encoding='utf-8'
+                )
+            with open(self._plot_tmp_file.name, 'w', encoding='utf-8') as f:
+                f.write(html)
+            self.web_view.setUrl(QUrl.fromLocalFile(self._plot_tmp_file.name))
 
             # Update status
             num_points = len(filtered_data)

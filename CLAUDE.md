@@ -9,10 +9,19 @@ PyQt6 desktop application for analyzing and visualizing camera sensor noise char
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # Install dependencies (requires ExifTool: brew install exiftool)
-python main.py                     # Run the application
-python test_app.py                 # Run component tests (no GUI required)
+# Install dependencies
+pip install -r requirements.txt
+# ExifTool required: sudo apt install libimage-exiftool-perl (Linux) or brew install exiftool (macOS)
+
+python main.py                     # Run the desktop application
+python test_app.py                 # Run component tests (no GUI required, custom framework)
+python test_raw_viewer.py <path_to_dng> [camera_model]  # Interactive raw viewer test
+
+# Jupyter notebook workflow (standalone, no GUI)
+jupyter lab sensor_noise.ipynb     # Uses sensor_camera.py directly for analysis
 ```
+
+No formal test framework (pytest/unittest) — tests use custom print-based assertions with sys.exit(1) on failure. No linter or formatter configured.
 
 ## Architecture
 
@@ -33,8 +42,8 @@ DataBrowser._on_filter_changed()
 
 ### Key Modules
 
-- **main.py** — Entry point. macOS integration, dependency checks, config/db/logger init, creates MainWindow + AppController
-- **sensor_camera.py** — Core analysis engine. `Sensor` class (single camera scan, noise stats, EV calculation) and `Analysis` class (multi-camera aggregate). EV = log2((white_level - black_level) / std_dev)
+- **main.py** — Entry point. macOS/PyInstaller integration, dependency checks, config/db/logger init, creates MainWindow + AppController
+- **sensor_camera.py** — Core analysis engine. `Sensor` class (single camera scan, noise stats, EV calculation) and `Analysis` class (multi-camera aggregate). EV = log2((white_level - black_level) / std_dev). Optional GPU acceleration via CuPy. Also used standalone from `sensor_noise.ipynb`
 - **controllers/app_controller.py** — Signal routing, background image loading, state coordination
 - **models/data_model.py** — DataFrame filtering, exposes data to views
 - **utils/db_manager.py** — SQLite database (images, cameras, analysis_results, exif_data, camera_attributes tables)
@@ -58,8 +67,17 @@ DataBrowser._on_filter_changed()
 - **Camera crops**: Defined in `sensor_camera.CAMERA_CROPS` dict, applied during image loading
 - **Working directory**: `~/.camera-char/` contains config.json, debug.log, db/analysis.db, .archive/ backups
 
+## Two Workflows
+
+1. **Desktop app** (`main.py`) — GUI for browsing, filtering, and plotting analysis data stored in SQLite
+2. **Notebook** (`sensor_noise.ipynb`) — Scripted analysis using `sensor_camera.py` directly, outputs to CSV files and Plotly figures
+
+Both share `sensor_camera.py` as the analysis engine. The desktop app can import data produced by the notebook workflow.
+
 ## Data Storage
 
 - **Database**: SQLite at `~/.camera-char/db/analysis.db` — images deduplicated by file hash
-- **Aggregate CSV**: `aggregate_analysis.csv` in project root (legacy, from notebook workflow)
+- **Aggregate CSV**: `aggregate_analysis.csv` in project root (from notebook workflow)
+- **Per-camera CSV**: `noise_results.csv` in each camera's scan directory (cached scan results)
 - **DB backups**: Timestamped copies in `~/.camera-char/.archive/` on each startup
+- **Raw images**: Stored in `detector-noise/` directory (gitignored), organized by camera model subdirectories
